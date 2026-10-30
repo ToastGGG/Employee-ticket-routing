@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">KNOWLEDGE BASE</span>
+      <h1>制度知识库</h1>
+      <p>上传 Markdown 或文本型 PDF，系统将自动切片并建立检索索引。</p>
+    </div>
+  </section>
+
+  <section class="content-card">
+    <h2>上传制度文件</h2>
+    <form action="/admin/knowledge/upload" method="post" enctype="multipart/form-data" class="upload-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="file-field">
+        <span>选择文件</span>
+        <input name="file" type="file" accept=".md,.pdf" required>
+      </label>
+      <label>
+        标题（可选）
+        <input name="title" maxlength="160" placeholder="默认使用文件名">
+      </label>
+      <label>
+        版本
+        <input name="version" maxlength="40" value="1.0">
+      </label>
+      <button class="button primary" type="submit">上传并建立索引</button>
+    </form>
+    <p class="muted small">单文件最大 20 MB。扫描版 PDF 暂不支持 OCR。</p>
+  </section>
+
+  <section class="content-card">
+    <div class="card-heading">
+      <h2>文档列表</h2>
+      <span class="muted">共 {{ documents|length }} 个</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>版本</th>
+            <th>状态</th>
+            <th>切片</th>
+            <th>上传人</th>
+            <th>上传时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for document in documents %}
+            <tr>
+              <td>
+                <strong>{{ document.title }}</strong>
+                <small class="block muted">{{ document.file_name }}</small>
+              </td>
+              <td>{{ document.version }}</td>
+              <td>
+                <span class="badge {{ 'ok' if document.status == 'ready' else 'bad' if document.status == 'failed' else 'pending' }}">
+                  {{ document.job_stage or document.status }}
+                </span>
+                {% if document.job_status and document.job_status not in ['ready', 'failed'] %}
+                  <small class="block muted job-status" data-job-id="{{ document.job_id }}">{{ document.job_progress or 0 }}%</small>
+                {% endif %}
+                {% if document.job_error %}
+                  <small class="block danger-text">{{ document.job_error }}</small>
+                {% endif %}
+              </td>
+              <td>{{ document.chunk_count or 0 }}</td>
+              <td>{{ document.created_by_name or '系统' }}</td>
+              <td>{{ document.created_at|datetime_cn }}</td>
+              <td>
+                {% if document.status != 'deleted' %}
+                  <form action="/admin/knowledge/{{ document.id }}/delete" method="post"
+                        onsubmit="return confirm('确定从问答索引中删除该制度文件吗？历史审计记录会保留。')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="button danger small-button" type="submit">删除</button>
+                  </form>
+                {% else %}
+                  <span class="muted">已删除</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="empty-cell">暂无制度文件。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <script>
+    /*
+     * 仅对处理中任务做轻量轮询；完成后刷新页面以显示最新切片和索引状态。
+     * 页面主体仍由服务端渲染。
+     */
+    const pending = document.querySelectorAll("[data-job-id]");
+    if (pending.length) {
+      const timer = setInterval(async () => {
+        let refresh = false;
+        for (const item of pending) {
+          const response = await fetch(`/api/admin/knowledge/jobs/${item.dataset.jobId}`);
+          if (!response.ok) continue;
+          const payload = await response.json();
+          item.textContent = `${payload.data.stage} · ${payload.data.progress}%`;
+          if (["ready", "failed"].includes(payload.data.status)) refresh = true;
+        }
+        if (refresh) {
+          clearInterval(timer);
+          location.reload();
+        }
+      }, 2000);
+    }
+  </script>
+{% endblock %}

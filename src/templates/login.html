@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · 员工薪酬福利咨询</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/admin.css') }}">
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="login-heading">
+      <span class="brand-mark">F</span>
+      <div>
+        <small>FORWARD DEPLOYED ENGINEERING</small>
+        <h1>员工薪酬福利咨询</h1>
+      </div>
+    </div>
+    <p class="login-intro">登录后进入员工问答入口或管理控制台。</p>
+    {% if error_message %}
+      <div class="notice danger">{{ error_message }}</div>
+    {% endif %}
+    <form action="/auth/login" method="post" class="stack-form">
+      <label>
+        登录名
+        <input name="username" value="{{ username }}" autocomplete="username" required>
+      </label>
+      <label>
+        密码
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="button primary" type="submit">登录</button>
+    </form>
+    <p class="muted small">
+      本地默认账号由环境变量初始化。部署前请修改默认管理员密码。
+    </p>
+  </main>
+</body>
+</html>

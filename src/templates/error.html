@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ status_code }} · {{ title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/admin.css') }}">
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <small class="error-code">{{ code }}</small>
+    <h1>{{ status_code }} · {{ title }}</h1>
+    <p class="muted">{{ message }}</p>
+    <p class="small">请求编号：<code>{{ request_id }}</code></p>
+    <a class="button primary" href="{{ '/admin' if current_user and current_user.role == 'admin' else '/login' }}">
+      返回
+    </a>
+  </main>
+</body>
+</html>

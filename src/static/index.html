@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>员工薪酬福利咨询</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f3f6fa;
+      --surface: #ffffff;
+      --surface-soft: #f7f9fc;
+      --ink: #152536;
+      --muted: #667586;
+      --line: #dce4ee;
+      --brand: #2563eb;
+      --brand-soft: #eaf1ff;
+      --success: #176b4d;
+      --danger: #a33131;
+      --shadow: 0 16px 42px rgba(28, 50, 78, 0.11);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1722;
+        --surface: #152231;
+        --surface-soft: #1b2a3a;
+        --ink: #eef5fb;
+        --muted: #a8b6c5;
+        --line: #2d4053;
+        --brand: #76a7ff;
+        --brand-soft: #1c3454;
+        --success: #75c8a5;
+        --danger: #ff9d9d;
+        --shadow: 0 16px 42px rgba(0, 0, 0, 0.28);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--brand) 10%, transparent), transparent 30rem),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    }
+
+    button,
+    textarea {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(960px, calc(100% - 32px));
+      margin: 32px auto;
+    }
+
+    .chat-panel {
+      min-height: calc(100vh - 64px);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: center;
+      padding: 22px 26px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand-title {
+      margin: 0;
+      font-size: 21px;
+      letter-spacing: -0.01em;
+    }
+
+    .brand-subtitle {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .session-badge {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .quiet-button {
+      border: 1px solid var(--line);
+      color: var(--ink);
+      background: transparent;
+      border-radius: 10px;
+      padding: 8px 11px;
+      cursor: pointer;
+    }
+
+    .quiet-button:hover {
+      background: var(--surface-soft);
+    }
+
+    .messages {
+      padding: 24px 26px 20px;
+      overflow-y: auto;
+      min-height: 420px;
+      max-height: calc(100vh - 245px);
+      scroll-behavior: smooth;
+    }
+
+    .welcome {
+      max-width: 640px;
+      margin: 8vh auto 0;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .welcome strong {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--ink);
+      font-size: 24px;
+    }
+
+    .suggestion-list {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 9px;
+      margin-top: 22px;
+    }
+
+    .suggestion {
+      border: 1px solid var(--line);
+      background: var(--surface-soft);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 9px 13px;
+      cursor: pointer;
+    }
+
+    .message-row {
+      display: flex;
+      margin: 16px 0;
+    }
+
+    .message-row.user {
+      justify-content: flex-end;
+    }
+
+    .message {
+      max-width: min(82%, 720px);
+      line-height: 1.75;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .message.user {
+      padding: 12px 15px;
+      color: #ffffff;
+      background: var(--brand);
+      border-radius: 16px 16px 4px 16px;
+    }
+
+    .assistant-block {
+      width: min(88%, 760px);
+    }
+
+    .assistant-role {
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .message.assistant {
+      padding: 15px 17px;
+      background: var(--surface-soft);
+      border: 1px solid var(--line);
+      border-radius: 16px 16px 16px 4px;
+    }
+
+    .typing-cursor {
+      display: inline-block;
+      width: 7px;
+      height: 1.15em;
+      margin-left: 2px;
+      vertical-align: -0.15em;
+      border-radius: 2px;
+      background: var(--brand);
+      animation: blink 0.85s steps(2, jump-none) infinite;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    .sources {
+      margin-top: 10px;
+      border-top: 1px dashed var(--line);
+      padding-top: 12px;
+    }
+
+    .sources-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      margin-bottom: 8px;
+    }
+
+    .source-card {
+      padding: 10px 12px;
+      margin: 8px 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+
+    .source-name {
+      color: var(--brand);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .source-excerpt {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.65;
+      margin-top: 4px;
+    }
+
+    .draft-card {
+      width: min(88%, 760px);
+      margin: 16px 0;
+      padding: 16px;
+      border: 1px solid color-mix(in srgb, var(--brand) 32%, var(--line));
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--brand-soft) 72%, var(--surface));
+    }
+
+    .draft-title {
+      margin: 0 0 8px;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .draft-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    .draft-description {
+      margin: 10px 0 13px;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+    }
+
+    .draft-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .confirm-draft {
+      border: 0;
+      border-radius: 10px;
+      padding: 9px 13px;
+      color: #ffffff;
+      background: var(--brand);
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .confirm-draft:disabled {
+      cursor: default;
+      opacity: 0.6;
+    }
+
+    .draft-note {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .status {
+      min-height: 20px;
+      padding: 0 28px 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    .composer {
+      padding: 16px 20px 20px;
+      border-top: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface) 92%, var(--brand) 8%);
+    }
+
+    .composer-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: end;
+      gap: 10px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 9px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 48px;
+      max-height: 150px;
+      resize: vertical;
+      border: 0;
+      outline: 0;
+      padding: 9px 10px;
+      color: var(--ink);
+      background: transparent;
+      line-height: 1.5;
+    }
+
+    .send-button {
+      border: 0;
+      border-radius: 12px;
+      background: var(--brand);
+      color: #ffffff;
+      min-width: 80px;
+      height: 44px;
+      padding: 0 16px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .send-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .composer-hint {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        width: 100%;
+        margin: 0;
+      }
+
+      .chat-panel {
+        min-height: 100vh;
+        border-radius: 0;
+        border: 0;
+      }
+
+      header {
+        align-items: flex-start;
+        padding: 18px;
+      }
+
+      .session-badge {
+        display: none;
+      }
+
+      .messages {
+        padding: 18px;
+        max-height: calc(100vh - 220px);
+      }
+
+      .message {
+        max-width: 90%;
+      }
+
+      .assistant-block {
+        width: 94%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="chat-panel" aria-label="员工薪酬福利咨询">
+      <header>
+        <div>
+          <h1 class="brand-title">员工薪酬福利咨询</h1>
+          <p class="brand-subtitle">回答基于现行制度资料，涉及个人待遇时请以人工确认为准</p>
+        </div>
+        <div class="header-actions">
+          <span class="session-badge" id="sessionLabel"></span>
+          <button class="quiet-button" id="newSessionButton" type="button">新会话</button>
+          <button class="quiet-button" id="logoutButton" type="button">退出登录</button>
+        </div>
+      </header>
+
+      <div class="messages" id="messages" aria-live="polite">
+        <div class="welcome" id="welcome">
+          <strong>有什么可以帮助你的？</strong>
+          你可以询问制度、材料、办理流程或处理时限。
+          <div class="suggestion-list" aria-label="示例问题">
+            <button class="suggestion" type="button">差旅报销需要哪些材料？</button>
+            <button class="suggestion" type="button">出差结束后多久内要提交报销？</button>
+            <button class="suggestion" type="button">住宿费用超过标准怎么办？</button>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="status" id="status" aria-live="polite"></div>
+        <form class="composer" id="composer">
+          <div class="composer-row">
+            <textarea
+              id="questionInput"
+              maxlength="2000"
+              rows="2"
+              placeholder="请输入你的薪酬福利问题…"
+              aria-label="问题"
+            ></textarea>
+            <button class="send-button" id="sendButton" type="submit">发送</button>
+          </div>
+          <div class="composer-hint">Enter 发送 · Shift + Enter 换行</div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    /*
+     * 单页程序说明：
+     * 1. session_id 保存在 sessionStorage，刷新页面仍可继续同一后端会话。
+     * 2. /chat 使用 POST + fetch，因为浏览器原生 EventSource 只支持 GET。
+     * 3. SSE 响应必须按“空行”切分；网络分块可能把同一事件拆到多个 read() 中。
+     * 4. 模型文本一律通过 textContent 写入，不把未转义内容当作 HTML 执行。
+     */
+    const messagesElement = document.getElementById("messages");
+    const welcomeElement = document.getElementById("welcome");
+    const statusElement = document.getElementById("status");
+    const formElement = document.getElementById("composer");
+    const inputElement = document.getElementById("questionInput");
+    const sendButton = document.getElementById("sendButton");
+    const newSessionButton = document.getElementById("newSessionButton");
+    const logoutButton = document.getElementById("logoutButton");
+    const sessionLabel = document.getElementById("sessionLabel");
+
+    let isStreaming = false;
+    let sessionId = sessionStorage.getItem("employee-chat-session-id");
+
+    /**
+     * 创建 UUID。通常使用 crypto.randomUUID；极老浏览器提供随机字节回退。
+     */
+    function createSessionId() {
+      if (crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0"));
+      return [
+        hex.slice(0, 4).join(""),
+        hex.slice(4, 6).join(""),
+        hex.slice(6, 8).join(""),
+        hex.slice(8, 10).join(""),
+        hex.slice(10, 16).join(""),
+      ].join("-");
+    }
+
+    if (!sessionId) {
+      sessionId = createSessionId();
+      sessionStorage.setItem("employee-chat-session-id", sessionId);
+    }
+    sessionLabel.textContent = `会话 ${sessionId.slice(0, 8)}`;
+
+    /**
+     * 读取非 HttpOnly 的 CSRF Cookie。
+     * JWT 本身保存在 HttpOnly Cookie 中，JavaScript 无法读取。
+     */
+    function readCookie(name) {
+      const prefix = `${name}=`;
+      return document.cookie
+        .split(";")
+        .map((part) => part.trim())
+        .find((part) => part.startsWith(prefix))
+        ?.slice(prefix.length) || "";
+    }
+
+    /**
+     * 加载当前用户信息。未登录时服务端通常已经重定向，这里作为双重保护。
+     */
+    async function loadCurrentUser() {
+      const response = await fetch("/api/auth/me", { headers: { "Accept": "application/json" } });
+      if (response.status === 401) {
+        location.href = "/login";
+        return;
+      }
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (payload.data.role === "admin") {
+        location.href = "/admin";
+        return;
+      }
+      sessionLabel.textContent = `${payload.data.name} · 会话 ${sessionId.slice(0, 8)}`;
+    }
+
+    /**
+     * 更新底部状态。error=true 时使用错误颜色并设置 role=alert。
+     */
+    function setStatus(text, isError = false) {
+      statusElement.textContent = text;
+      statusElement.classList.toggle("error", isError);
+      statusElement.setAttribute("role", isError ? "alert" : "status");
+    }
+
+    /**
+     * 设置当前是否正在接收回答，防止重复提交。
+     */
+    function setStreaming(value) {
+      isStreaming = value;
+      sendButton.disabled = value;
+      sendButton.textContent = value ? "生成中" : "发送";
+      inputElement.disabled = value;
+    }
+
+    /**
+     * 隐藏欢迎区和示例问题。
+     */
+    function hideWelcome() {
+      if (welcomeElement) {
+        welcomeElement.remove();
+      }
+    }
+
+    /**
+     * 添加员工问题气泡。
+     */
+    function appendUserMessage(text) {
+      hideWelcome();
+      const row = document.createElement("div");
+      row.className = "message-row user";
+      const bubble = document.createElement("div");
+      bubble.className = "message user";
+      bubble.textContent = text;
+      row.appendChild(bubble);
+      messagesElement.appendChild(row);
+      messagesElement.scrollTop = messagesElement.scrollHeight;
+    }
+
+    /**
+     * 创建助手回答容器。
+     * 返回正文节点、引用容器和光标，后续 SSE delta/sources 事件分别更新它们。
+     */
+    function createAssistantMessage() {
+      const row = document.createElement("div");
+      row.className = "message-row";
+      const block = document.createElement("div");
+      block.className = "assistant-block";
+
+      const role = document.createElement("div");
+      role.className = "assistant-role";
+      role.textContent = "薪酬福利助手";
+
+      const bubble = document.createElement("div");
+      bubble.className = "message assistant";
+      const text = document.createElement("span");
+      const cursor = document.createElement("span");
+      cursor.className = "typing-cursor";
+      cursor.setAttribute("aria-hidden", "true");
+      bubble.append(text, cursor);
+
+      const sources = document.createElement("div");
+      sources.className = "sources";
+      sources.hidden = true;
+
+      block.append(role, bubble, sources);
+      row.appendChild(block);
+      messagesElement.appendChild(row);
+      messagesElement.scrollTop = messagesElement.scrollHeight;
+      return { text, cursor, sources };
+    }
+
+    /**
+     * 逐字符显示模型增量，形成打字机效果。
+     * 网络内容先进入 answerQueue，页面显示速度与网络分块大小解耦。
+     */
+    async function typewriter(textElement, text) {
+      for (const character of text) {
+        textElement.textContent += character;
+        messagesElement.scrollTop = messagesElement.scrollHeight;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    /**
+     * 在回答底部绘制制度来源。
+     */
+    function renderSources(container, sources) {
+      container.replaceChildren();
+      if (!Array.isArray(sources) || sources.length === 0) {
+        container.hidden = true;
+        return;
+      }
+
+      const title = document.createElement("div");
+      title.className = "sources-title";
+      title.textContent = "制度来源";
+      container.appendChild(title);
+
+      sources.forEach((source, index) => {
+        const card = document.createElement("div");
+        card.className = "source-card";
+        const name = document.createElement("div");
+        name.className = "source-name";
+        name.textContent = `${index + 1}. ${source.file_name}（${source.document_version}）`;
+        const excerpt = document.createElement("div");
+        excerpt.className = "source-excerpt";
+        excerpt.textContent = source.excerpt;
+        card.append(name, excerpt);
+        container.appendChild(card);
+      });
+      container.hidden = false;
+    }
+
+    /**
+     * 渲染服务端生成的工单草稿。
+     *
+     * 草稿事件只代表“已验证且可确认”，不代表已提交。正式提交必须由员工
+     * 点击按钮，后端还会再次核对草稿所有者、版本和 15 分钟有效期。
+     */
+    function appendDraftCard(draft) {
+      hideWelcome();
+      const card = document.createElement("section");
+      card.className = "draft-card";
+      card.setAttribute("aria-label", "待确认工单草稿");
+
+      const title = document.createElement("h2");
+      title.className = "draft-title";
+      title.textContent = `待确认草稿 · ${draft.draft_no || ""}`;
+
+      const meta = document.createElement("div");
+      meta.className = "draft-meta";
+      const queueText = draft.queue ? `队列：${draft.queue}` : "队列：待分配";
+      const priorityText = draft.priority ? `优先级：${draft.priority}` : "优先级：普通";
+      meta.textContent = `${queueText} · ${priorityText} · 草稿尚未提交`;
+
+      const description = document.createElement("div");
+      description.className = "draft-description";
+      description.textContent = draft.description || draft.title || "";
+
+      const actions = document.createElement("div");
+      actions.className = "draft-actions";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "confirm-draft";
+      button.textContent = "确认并提交";
+      button.addEventListener("click", () => confirmDraft(draft, button));
+      const note = document.createElement("span");
+      note.className = "draft-note";
+      note.textContent = "请先核对标题和说明；提交后不可再次修改本次草稿。";
+      actions.append(button, note);
+
+      card.append(title, meta, description, actions);
+      messagesElement.appendChild(card);
+      messagesElement.scrollTop = messagesElement.scrollHeight;
+    }
+
+    /**
+     * 员工显式确认草稿。按钮点击后才调用独立提交接口，模型无法代点。
+     */
+    async function confirmDraft(draft, button) {
+      if (!window.confirm("确认将这张草稿正式提交给处理队列吗？")) {
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "正在提交…";
+      setStatus("正在核对草稿版本和有效期…");
+      try {
+        const response = await fetch(
+          `/api/tickets/${encodeURIComponent(draft.draft_id)}/confirm`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "X-CSRF-Token": readCookie("employee_csrf_token"),
+            },
+            body: JSON.stringify({
+              confirmed: true,
+              draft_version: draft.draft_version,
+            }),
+          }
+        );
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(result?.message || `提交失败（HTTP ${response.status}）。`);
+        }
+        button.textContent = "已提交";
+        setStatus(`工单 ${result.data.draft_no} 已提交。`);
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "重新确认提交";
+        setStatus(error.message || "工单提交失败，请稍后重试。", true);
+      }
+    }
+
+    /**
+     * 解析一个 SSE 事件块。
+     * block 可能包含 event、data、id 等多行；本应用只使用 event 和 data。
+     */
+    function parseSseBlock(block) {
+      let eventName = "message";
+      const dataLines = [];
+      block.split("\n").forEach((line) => {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      });
+      return { event: eventName, data: dataLines.join("\n") };
+    }
+
+    /**
+     * 发送问题并消费 POST /chat 返回的 SSE。
+     */
+    async function sendQuestion(question) {
+      if (isStreaming) return;
+      const normalized = question.trim();
+      if (!normalized) {
+        setStatus("问题不能为空。", true);
+        inputElement.focus();
+        return;
+      }
+
+      appendUserMessage(normalized);
+      inputElement.value = "";
+      setStreaming(true);
+      setStatus("正在连接服务…");
+
+      const assistant = createAssistantMessage();
+      let receivedAnswer = "";
+      let terminalEventReceived = false;
+
+      try {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "X-CSRF-Token": readCookie("employee_csrf_token"),
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            question: normalized,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => null);
+          if (response.status === 401) {
+            location.href = "/login";
+            return;
+          }
+          throw new Error(
+            error?.message || `请求失败（HTTP ${response.status}）。`
+          );
+        }
+        if (!response.body) {
+          throw new Error("浏览器无法读取流式响应。");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+
+          // SSE 以两个换行分隔事件；最后一段可能还没接收完整，保留到下一轮。
+          const blocks = buffer.split("\n\n");
+          buffer = blocks.pop() || "";
+
+          for (const block of blocks) {
+            if (!block.trim()) continue;
+            const parsed = parseSseBlock(block);
+            if (!parsed.data) continue;
+
+            let data;
+            try {
+              data = JSON.parse(parsed.data);
+            } catch {
+              continue;
+            }
+
+            if (parsed.event === "status") {
+              setStatus(data.message || "正在处理…");
+            } else if (parsed.event === "delta") {
+              const text = String(data.text || "");
+              receivedAnswer += text;
+              await typewriter(assistant.text, text);
+            } else if (parsed.event === "sources") {
+              renderSources(assistant.sources, data.sources || []);
+            } else if (parsed.event === "draft") {
+              appendDraftCard(data);
+            } else if (parsed.event === "tool") {
+              const toolLabels = {
+                get_employee_profile: "正在读取员工信息…",
+                search_knowledge: "正在检索制度依据…",
+                validate_policy: "正在校验制度适用性…",
+                validate_invoice: "正在校验报销资料…",
+                route_ticket: "正在判断分流队列…",
+                create_ticket_draft: "正在生成工单草稿…",
+                request_human_review: "正在创建人工复核…",
+                get_ticket_status: "正在查询工单状态…",
+              };
+              setStatus(
+                toolLabels[data.name] || data.message || "正在执行安全校验…",
+                data.ok === false
+              );
+            } else if (parsed.event === "done") {
+              terminalEventReceived = true;
+              assistant.cursor.remove();
+              setStatus("回答完成。");
+            } else if (parsed.event === "error") {
+              terminalEventReceived = true;
+              assistant.cursor.remove();
+              setStatus(
+                data.message || "回答生成失败，请稍后重试。",
+                true
+              );
+            }
+          }
+        }
+
+        if (!terminalEventReceived) {
+          assistant.cursor.remove();
+          setStatus("回答连接已中断，请重试。", true);
+        }
+      } catch (error) {
+        assistant.cursor.remove();
+        setStatus(error.message || "请求失败，请稍后重试。", true);
+        if (!receivedAnswer) {
+          assistant.text.textContent = "暂时无法完成回答。";
+        }
+      } finally {
+        setStreaming(false);
+        inputElement.focus();
+      }
+    }
+
+    // 表单提交：按钮点击和 Enter 都进入同一路径。
+    formElement.addEventListener("submit", (event) => {
+      event.preventDefault();
+      sendQuestion(inputElement.value);
+    });
+
+    // Enter 发送；Shift+Enter 保留换行。
+    inputElement.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        formElement.requestSubmit();
+      }
+    });
+
+    // 示例问题按钮：点击后直接发送。
+    document.querySelectorAll(".suggestion").forEach((button) => {
+      button.addEventListener("click", () => sendQuestion(button.textContent));
+    });
+
+    // 新会话只清空当前页面和 sessionStorage，不删除数据库中的历史会话。
+    newSessionButton.addEventListener("click", () => {
+      if (isStreaming) return;
+      sessionId = createSessionId();
+      sessionStorage.setItem("employee-chat-session-id", sessionId);
+      sessionLabel.textContent = `会话 ${sessionId.slice(0, 8)}`;
+      messagesElement.replaceChildren();
+      const welcome = document.createElement("div");
+      welcome.className = "welcome";
+      welcome.id = "welcome";
+      welcome.innerHTML = "";
+      const strong = document.createElement("strong");
+      strong.textContent = "有什么可以帮助你的？";
+      welcome.appendChild(strong);
+      welcome.appendChild(document.createTextNode("你可以询问制度、材料、办理流程或处理时限。"));
+      messagesElement.appendChild(welcome);
+      setStatus("");
+      inputElement.focus();
+    });
+
+    // 退出登录使用 POST 表单并携带 CSRF Token，避免普通链接触发状态修改。
+    logoutButton.addEventListener("click", () => {
+      if (isStreaming) return;
+      const form = document.createElement("form");
+      form.method = "post";
+      form.action = "/auth/logout";
+      const csrf = document.createElement("input");
+      csrf.type = "hidden";
+      csrf.name = "csrf_token";
+      csrf.value = readCookie("employee_csrf_token");
+      form.appendChild(csrf);
+      document.body.appendChild(form);
+      form.submit();
+    });
+
+    loadCurrentUser();
+  </script>
+</body>
+</html>

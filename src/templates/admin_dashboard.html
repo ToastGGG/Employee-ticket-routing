@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">ADMIN OVERVIEW</span>
+      <h1>运营总览</h1>
+      <p>查看知识索引、咨询记录与审计状态。</p>
+    </div>
+    <a class="button" href="/admin/knowledge">管理制度知识库</a>
+  </section>
+
+  <section class="metric-grid">
+    <article class="metric-card">
+      <span>已发布制度</span>
+      <strong>{{ counts.documents }}</strong>
+      <small>当前可用于问答</small>
+    </article>
+    <article class="metric-card">
+      <span>处理中任务</span>
+      <strong>{{ counts.processing }}</strong>
+      <small>解析或建立索引</small>
+    </article>
+    <article class="metric-card">
+      <span>员工会话</span>
+      <strong>{{ counts.conversations }}</strong>
+      <small>可进入审计页查看</small>
+    </article>
+    <article class="metric-card">
+      <span>有效违规标记</span>
+      <strong>{{ counts.flags }}</strong>
+      <small>需继续跟进的工单</small>
+    </article>
+  </section>
+
+  <section class="content-card two-column">
+    <article>
+      <span class="eyebrow">KNOWLEDGE STATUS</span>
+      <h2>知识索引状态</h2>
+      {% if runtime.ready %}
+        <p><span class="status-dot ok"></span>检索服务正常</p>
+        <p class="muted">文档 {{ runtime.document_count }} 份，切片 {{ runtime.chunk_count }} 个。</p>
+      {% else %}
+        <p><span class="status-dot bad"></span>检索服务未就绪</p>
+        <p class="muted">{{ runtime.error_message or '请先上传制度文件。' }}</p>
+      {% endif %}
+    </article>
+    <article>
+      <span class="eyebrow">NEXT ACTION</span>
+      <h2>管理建议</h2>
+      <ol class="plain-list">
+        <li>检查制度文件的处理状态。</li>
+        <li>审核当前系统提示词版本。</li>
+        <li>抽查员工会话与疑似违规工单。</li>
+      </ol>
+    </article>
+  </section>
+{% endblock %}

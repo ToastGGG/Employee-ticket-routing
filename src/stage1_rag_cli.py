@@ -716,6 +716,7 @@ def build_cache_namespace(settings: Settings, document_text: str) -> str:
             str(settings.chunk_size),
             str(settings.chunk_overlap),
             settings.embedding_provider,
+            settings.embedding_api_url or "",
             settings.embedding_model or "",
             str(settings.embedding_dimension),
         ]
@@ -741,7 +742,10 @@ def persist_index(
     chunks_path = cache_dir / f"{namespace}.chunks.json"
     metadata_path = cache_dir / f"{namespace}.meta.json"
 
-    faiss.write_index(index.index, str(index_path))
+    # Windows 下 faiss.write_index 对包含中文的路径兼容性较差；
+    # 先序列化为 bytes，再使用 Python 文件 API 写入，可安全支持中文目录。
+    serialized = faiss.serialize_index(index.index)
+    index_path.write_bytes(np.asarray(serialized, dtype=np.uint8).tobytes())
     chunks_payload = [
         {
             "chunk_id": chunk.chunk_id,
@@ -795,31 +799,37 @@ def load_or_build_index(
     embedding_provider = build_embedding_provider(settings)
 
     if not rebuild and index_path.exists() and chunks_path.exists():
-        chunks_payload = json.loads(chunks_path.read_text(encoding="utf-8"))
-        chunks = [
-            Chunk(
-                chunk_id=int(item["chunk_id"]),
-                text=str(item["text"]),
-                start_char=int(item["start_char"]),
-                end_char=int(item["end_char"]),
+        try:
+            chunks_payload = json.loads(chunks_path.read_text(encoding="utf-8"))
+            chunks = [
+                Chunk(
+                    chunk_id=int(item["chunk_id"]),
+                    text=str(item["text"]),
+                    start_char=int(item["start_char"]),
+                    end_char=int(item["end_char"]),
+                )
+                for item in chunks_payload
+            ]
+            index = faiss.deserialize_index(
+                np.frombuffer(index_path.read_bytes(), dtype=np.uint8)
             )
-            for item in chunks_payload
-        ]
-        index = faiss.read_index(str(index_path))
-        if index.ntotal != len(chunks):
-            raise RuntimeError("FAISS 索引与切片缓存数量不一致，请使用 --rebuild-index")
-        bm25 = BM25Index(
-            [tokenize_for_retrieval(chunk.text) for chunk in chunks]
-        )
-        print(f"[索引] 已从缓存加载 {len(chunks)} 个文档切片")
-        return HybridRagIndex(
-            chunks=chunks,
-            index=index,
-            bm25=bm25,
-            embedding_provider=embedding_provider,
-            vector_weight=settings.vector_weight,
-            bm25_weight=settings.bm25_weight,
-        )
+            if index.ntotal != len(chunks):
+                raise RuntimeError("FAISS 索引与切片缓存数量不一致")
+            bm25 = BM25Index(
+                [tokenize_for_retrieval(chunk.text) for chunk in chunks]
+            )
+            print(f"[索引] 已从缓存加载 {len(chunks)} 个文档切片")
+            return HybridRagIndex(
+                chunks=chunks,
+                index=index,
+                bm25=bm25,
+                embedding_provider=embedding_provider,
+                vector_weight=settings.vector_weight,
+                bm25_weight=settings.bm25_weight,
+            )
+        except Exception as exc:
+            # 缓存损坏或旧版本格式不兼容时自动重建，而不是阻止应用启动。
+            print(f"[索引] 缓存不可用，将自动重建：{exc}")
 
     chunks = chunk_markdown(
         document_text,

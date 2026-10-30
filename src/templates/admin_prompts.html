@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">PROMPT GOVERNANCE</span>
+      <h1>提示词模板</h1>
+      <p>每次发布创建一个新版本；问答请求始终读取当前 active 版本。</p>
+    </div>
+  </section>
+
+  <section class="content-card">
+    <div class="card-heading">
+      <h2>当前生效版本</h2>
+      {% if active_prompt %}
+        <span class="badge ok">v{{ active_prompt.version }}</span>
+      {% endif %}
+    </div>
+    <form action="/admin/prompts" method="post" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        系统提示词
+        <textarea name="content" rows="9" maxlength="8000" required>{{ active_prompt.content if active_prompt else '' }}</textarea>
+      </label>
+      <label>
+        修改原因
+        <input name="change_note" maxlength="300" placeholder="例如：补充禁止编造报销标准的约束" required>
+      </label>
+      <button class="button primary" type="submit">发布新版本并立即生效</button>
+    </form>
+  </section>
+
+  <section class="content-card">
+    <h2>版本历史</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>版本</th><th>状态</th><th>修改原因</th><th>创建时间</th></tr>
+        </thead>
+        <tbody>
+          {% for version in versions %}
+            <tr>
+              <td>v{{ version.version }}</td>
+              <td><span class="badge {{ 'ok' if version.status == 'active' else '' }}">{{ version.status }}</span></td>
+              <td>{{ version.change_note }}</td>
+              <td>{{ version.created_at|datetime_cn }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

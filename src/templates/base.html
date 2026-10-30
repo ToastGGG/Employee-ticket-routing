@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · 员工薪酬福利咨询</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/admin.css') }}">
+</head>
+<body>
+  <div class="admin-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin">
+        <span class="brand-mark">F</span>
+        <span>
+          <strong>FDE 员工服务</strong>
+          <small>管理控制台</small>
+        </span>
+      </a>
+      <nav class="nav-list" aria-label="管理后台导航">
+        <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/admin">
+          <span>总览</span><small>Overview</small>
+        </a>
+        <a class="{{ 'active' if active_page == 'knowledge' else '' }}" href="/admin/knowledge">
+          <span>制度知识库</span><small>Knowledge</small>
+        </a>
+        <a class="{{ 'active' if active_page == 'prompts' else '' }}" href="/admin/prompts">
+          <span>提示词模板</span><small>Prompt</small>
+        </a>
+        <a class="{{ 'active' if active_page == 'audit' else '' }}" href="/admin/audit">
+          <span>对话审计</span><small>Audit</small>
+        </a>
+      </nav>
+      <div class="sidebar-note">
+        <strong>权限边界</strong>
+        <p>管理员维护制度与提示词，并审查员工会话。</p>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div class="breadcrumb">{{ title }}</div>
+        <div class="account">
+          <span>{{ current_user.name }} · {{ current_user.role }}</span>
+          <form action="/auth/logout" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button quiet" type="submit">退出登录</button>
+          </form>
+        </div>
+      </header>
+
+      <main class="content">
+        {% if message %}
+          <div class="notice success">{{ message }}</div>
+        {% endif %}
+        {% if error %}
+          <div class="notice danger">{{ error }}</div>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+</body>
+</html>

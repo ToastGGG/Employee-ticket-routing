@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">CONVERSATION AUDIT</span>
+      <h1>对话审计</h1>
+      <p>按员工、时间和违规状态筛选咨询记录。</p>
+    </div>
+  </section>
+
+  <section class="content-card">
+    <form method="get" action="/admin/audit" class="filter-grid">
+      <label>
+        员工
+        <select name="employee_id">
+          <option value="">全部员工</option>
+          {% for employee in employees %}
+            <option value="{{ employee.id }}" {{ 'selected' if filters.employee_id == employee.id else '' }}>
+              {{ employee.name }}（{{ employee.employee_no }}）
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        开始日期
+        <input type="date" name="from_date" value="{{ filters.from_date }}">
+      </label>
+      <label>
+        结束日期
+        <input type="date" name="to_date" value="{{ filters.to_date }}">
+      </label>
+      <label>
+        违规状态
+        <select name="flagged">
+          <option value="all" {{ 'selected' if filters.flagged == 'all' else '' }}>全部</option>
+          <option value="flagged" {{ 'selected' if filters.flagged == 'flagged' else '' }}>已标记</option>
+          <option value="unflagged" {{ 'selected' if filters.flagged == 'unflagged' else '' }}>未标记</option>
+        </select>
+      </label>
+      <button class="button primary" type="submit">筛选</button>
+    </form>
+  </section>
+
+  <section class="content-card">
+    <div class="card-heading">
+      <h2>会话记录</h2>
+      <span class="muted">共 {{ total }} 条</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>员工</th>
+            <th>最近问题</th>
+            <th>消息</th>
+            <th>工单</th>
+            <th>违规标记</th>
+            <th>最后活动</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for conversation in conversations %}
+            <tr>
+              <td>
+                <strong>{{ conversation.employee_name }}</strong>
+                <small class="block muted">{{ conversation.employee_no }}</small>
+              </td>
+              <td class="question-cell">{{ conversation.last_question or '暂无问题' }}</td>
+              <td>{{ conversation.completed_messages }}</td>
+              <td>{{ conversation.ticket_count }}</td>
+              <td>
+                {% if conversation.active_flags %}
+                  <span class="badge bad">{{ conversation.active_flags }} 项</span>
+                {% else %}
+                  <span class="badge">未标记</span>
+                {% endif %}
+              </td>
+              <td>{{ conversation.updated_at|datetime_cn }}</td>
+              <td><a class="button small-button" href="/admin/audit/{{ conversation.id }}">查看</a></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="empty-cell">没有符合条件的会话。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      {% if page > 1 %}
+        <a class="button small-button" href="?employee_id={{ filters.employee_id }}&from_date={{ filters.from_date }}&to_date={{ filters.to_date }}&flagged={{ filters.flagged }}&page={{ page - 1 }}">上一页</a>
+      {% endif %}
+      <span>第 {{ page }} / {{ total_pages }} 页</span>
+      {% if page < total_pages %}
+        <a class="button small-button" href="?employee_id={{ filters.employee_id }}&from_date={{ filters.from_date }}&to_date={{ filters.to_date }}&flagged={{ filters.flagged }}&page={{ page + 1 }}">下一页</a>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}

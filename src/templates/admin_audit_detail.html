@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <a class="back-link" href="/admin/audit">← 返回审计列表</a>
+      <span class="eyebrow">AUDIT DETAIL</span>
+      <h1>{{ conversation.employee_name }} 的会话</h1>
+      <p>会话 ID：<code>{{ conversation.id }}</code></p>
+    </div>
+  </section>
+
+  <section class="content-card">
+    <div class="meta-grid">
+      <div><span>员工</span><strong>{{ conversation.employee_name }}</strong></div>
+      <div><span>工号</span><strong>{{ conversation.employee_no }}</strong></div>
+      <div><span>开始时间</span><strong>{{ conversation.created_at|datetime_cn }}</strong></div>
+      <div><span>最后活动</span><strong>{{ conversation.updated_at|datetime_cn }}</strong></div>
+    </div>
+  </section>
+
+  <section class="content-card">
+    <h2>对话记录</h2>
+    <div class="thread">
+      {% for message in messages %}
+        <article class="message-card {{ message.role }}">
+          <header>
+            <strong>{{ '员工' if message.role == 'user' else '薪酬福利助手' }}</strong>
+            <span class="muted">{{ message.created_at|datetime_cn }} · {{ message.status }}</span>
+          </header>
+          <div class="message-content">{{ message.content }}</div>
+          {% if message.citations %}
+            <details>
+              <summary>引用来源 · {{ message.citations|length }}</summary>
+              {% for citation in message.citations %}
+                <div class="citation">
+                  <strong>{{ citation.file_name }}（{{ citation.document_version }}）</strong>
+                  <p>{{ citation.excerpt }}</p>
+                </div>
+              {% endfor %}
+            </details>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="content-card">
+    <h2>工单草稿</h2>
+    {% for draft in ticket_drafts %}
+      <article class="sub-card">
+        <div class="card-heading">
+          <strong>{{ draft.title }}</strong>
+          <span class="badge">{{ draft.status }}</span>
+        </div>
+        <p>{{ draft.summary or '暂无摘要' }}</p>
+        <small class="muted">工单 ID：{{ draft.id }}</small>
+      </article>
+    {% else %}
+      <p class="muted">该会话尚未产生工单草稿。</p>
+    {% endfor %}
+  </section>
+
+  <section class="content-card two-column">
+    <article>
+      <h2>标记疑似违规工单</h2>
+      <form action="/admin/audit/{{ conversation.id }}/flag" method="post" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          关联工单草稿
+          <select name="ticket_draft_id">
+            <option value="">不关联具体工单</option>
+            {% for draft in ticket_drafts %}
+              <option value="{{ draft.id }}">{{ draft.title }}（{{ draft.id }}）</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          违规类别
+          <select name="category">
+            <option>错误政策</option>
+            <option>越权承诺</option>
+            <option>敏感信息</option>
+            <option>重复提交</option>
+            <option>其他</option>
+          </select>
+        </label>
+        <label>
+          原因
+          <textarea name="reason" rows="4" maxlength="1000" required></textarea>
+        </label>
+        <button class="button danger" type="submit">提交违规标记</button>
+      </form>
+    </article>
+    <article>
+      <h2>标记历史</h2>
+      {% for flag in flags %}
+        <div class="sub-card">
+          <div class="card-heading">
+            <strong>{{ flag.category }}</strong>
+            <span class="badge {{ 'bad' if flag.status == 'active' else '' }}">{{ flag.status }}</span>
+          </div>
+          <p>{{ flag.reason }}</p>
+          <small class="muted">标记时间：{{ flag.marked_at|datetime_cn }}</small>
+          {% if flag.revoke_reason %}
+            <small class="block muted">撤销原因：{{ flag.revoke_reason }}</small>
+          {% endif %}
+        </div>
+      {% else %}
+        <p class="muted">暂无违规标记。</p>
+      {% endfor %}
+      {% if flags|selectattr('status', 'equalto', 'active')|list %}
+        <form action="/admin/audit/{{ conversation.id }}/unflag" method="post" class="stack-form compact-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label>
+            撤销原因
+            <input name="revoke_reason" maxlength="500" required>
+          </label>
+          <button class="button" type="submit">撤销全部有效标记</button>
+        </form>
+      {% endif %}
+    </article>
+  </section>
+{% endblock %}
