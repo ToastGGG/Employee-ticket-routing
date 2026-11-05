@@ -235,6 +235,22 @@ class SQLiteDatabase:
                     purpose TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS agent_decision_logs (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    round_no INTEGER NOT NULL,
+                    decision_type TEXT NOT NULL,
+                    tool_name TEXT,
+                    arguments_json TEXT,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    result_summary TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
                     ON conversations(user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
@@ -253,6 +269,10 @@ class SQLiteDatabase:
                     ON audit_logs(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_ticket_drafts_user
                     ON ticket_drafts(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_decision_logs_request
+                    ON agent_decision_logs(request_id, round_no, created_at);
+                CREATE INDEX IF NOT EXISTS idx_agent_decision_logs_conversation
+                    ON agent_decision_logs(conversation_id, created_at);
                 """
             )
             # 对阶段 1 已存在的 SQLite 表做向前兼容迁移。
@@ -1537,6 +1557,78 @@ class SQLiteDatabase:
                 ),
             )
             await connection.commit()
+
+    async def write_agent_decision_log(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        request_id: str,
+        round_no: int,
+        decision_type: str,
+        tool_name: str | None,
+        arguments: dict[str, Any] | None,
+        duration_ms: int,
+        result_summary: str,
+    ) -> str:
+        """
+        记录 Agent 每一轮的决策轨迹。
+
+        该表专供阶段 5 做效果分析：可按会话或 request_id 还原
+        “模型决策 → 工具 → 耗时 → 结果”的完整过程。凭证参数在写入前
+        已由 Agent Harness 脱敏。
+        """
+
+        log_id = str(uuid.uuid4())
+        async with self._connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO agent_decision_logs
+                    (
+                        id, conversation_id, user_id, request_id, round_no,
+                        decision_type, tool_name, arguments_json,
+                        duration_ms, result_summary, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_id,
+                    conversation_id,
+                    user_id,
+                    request_id,
+                    round_no,
+                    decision_type,
+                    tool_name,
+                    json.dumps(arguments, ensure_ascii=False)
+                    if arguments is not None
+                    else None,
+                    max(duration_ms, 0),
+                    result_summary[:1000],
+                    utc_now(),
+                ),
+            )
+            await connection.commit()
+        return log_id
+
+    async def list_agent_decision_logs(
+        self,
+        *,
+        conversation_id: str,
+    ) -> list[dict[str, Any]]:
+        """按轮次返回会话的 Agent 决策轨迹，供阶段 5 分析或测试使用。"""
+
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT *
+                FROM agent_decision_logs
+                WHERE conversation_id = ?
+                ORDER BY round_no, created_at
+                """,
+                (conversation_id,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def dashboard_counts(self) -> dict[str, int]:
         """管理首页需要的轻量统计数据。"""

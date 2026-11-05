@@ -424,9 +424,10 @@
           <strong>有什么可以帮助你的？</strong>
           你可以询问制度、材料、办理流程或处理时限。
           <div class="suggestion-list" aria-label="示例问题">
-            <button class="suggestion" type="button">差旅报销需要哪些材料？</button>
-            <button class="suggestion" type="button">出差结束后多久内要提交报销？</button>
-            <button class="suggestion" type="button">住宿费用超过标准怎么办？</button>
+            <button class="suggestion" type="button">新人入职首月薪酬和福利有哪些？</button>
+            <button class="suggestion" type="button">年假天数如何计算？</button>
+            <button class="suggestion" type="button">社保和公积金基数怎么确定？</button>
+            <button class="suggestion" type="button">帮我提交我的咨询工单</button>
           </div>
         </div>
       </div>
@@ -647,41 +648,41 @@
     }
 
     /**
-     * 渲染服务端生成的工单草稿。
+     * 渲染 Harness 发出的建单预览。
      *
-     * 草稿事件只代表“已验证且可确认”，不代表已提交。正式提交必须由员工
-     * 点击按钮，后端还会再次核对草稿所有者、版本和 15 分钟有效期。
+     * 此事件到达时 create_ticket_draft 尚未执行，数据库中没有草稿。
+     * 员工点击确认后，后端才会创建并提交工单。
      */
-    function appendDraftCard(draft) {
+    function appendDraftCard(proposal) {
       hideWelcome();
       const card = document.createElement("section");
       card.className = "draft-card";
-      card.setAttribute("aria-label", "待确认工单草稿");
+      card.setAttribute("aria-label", "待确认工单预览");
 
       const title = document.createElement("h2");
       title.className = "draft-title";
-      title.textContent = `待确认草稿 · ${draft.draft_no || ""}`;
+      title.textContent = "待确认建单预览";
 
       const meta = document.createElement("div");
       meta.className = "draft-meta";
-      const queueText = draft.queue ? `队列：${draft.queue}` : "队列：待分配";
-      const priorityText = draft.priority ? `优先级：${draft.priority}` : "优先级：普通";
-      meta.textContent = `${queueText} · ${priorityText} · 草稿尚未提交`;
+      const queueText = proposal.queue ? `队列：${proposal.queue}` : "队列：待分配";
+      const priorityText = proposal.priority ? `优先级：${proposal.priority}` : "优先级：普通";
+      meta.textContent = `${queueText} · ${priorityText} · 工具尚未执行`;
 
       const description = document.createElement("div");
       description.className = "draft-description";
-      description.textContent = draft.description || draft.title || "";
+      description.textContent = proposal.description || proposal.title || "";
 
       const actions = document.createElement("div");
       actions.className = "draft-actions";
       const button = document.createElement("button");
       button.type = "button";
       button.className = "confirm-draft";
-      button.textContent = "确认并提交";
-      button.addEventListener("click", () => confirmDraft(draft, button));
+      button.textContent = "确认创建并提交";
+      button.addEventListener("click", () => confirmDraft(proposal, button));
       const note = document.createElement("span");
       note.className = "draft-note";
-      note.textContent = "请先核对标题和说明；提交后不可再次修改本次草稿。";
+      note.textContent = "确认前不会创建工单；预览 10 分钟内有效。";
       actions.append(button, note);
 
       card.append(title, meta, description, actions);
@@ -690,18 +691,18 @@
     }
 
     /**
-     * 员工显式确认草稿。按钮点击后才调用独立提交接口，模型无法代点。
+     * 员工显式确认建单预览。按钮点击后才真正执行 create_ticket_draft。
      */
-    async function confirmDraft(draft, button) {
-      if (!window.confirm("确认将这张草稿正式提交给处理队列吗？")) {
+    async function confirmDraft(proposal, button) {
+      if (!window.confirm("确认创建并提交这张薪酬福利咨询工单吗？")) {
         return;
       }
       button.disabled = true;
-      button.textContent = "正在提交…";
-      setStatus("正在核对草稿版本和有效期…");
+      button.textContent = "正在创建并提交…";
+      setStatus("正在执行建单工具并核对一次性凭证…");
       try {
         const response = await fetch(
-          `/api/tickets/${encodeURIComponent(draft.draft_id)}/confirm`,
+          `/api/agent/confirmations/${encodeURIComponent(proposal.confirmation_id)}/confirm`,
           {
             method: "POST",
             headers: {
@@ -711,7 +712,6 @@
             },
             body: JSON.stringify({
               confirmed: true,
-              draft_version: draft.draft_version,
             }),
           }
         );
@@ -720,6 +720,9 @@
           throw new Error(result?.message || `提交失败（HTTP ${response.status}）。`);
         }
         button.textContent = "已提交";
+        const card = button.closest(".draft-card");
+        const heading = card?.querySelector(".draft-title");
+        if (heading) heading.textContent = `工单已提交 · ${result.data.draft_no}`;
         setStatus(`工单 ${result.data.draft_no} 已提交。`);
       } catch (error) {
         button.disabled = false;
@@ -827,16 +830,16 @@
               await typewriter(assistant.text, text);
             } else if (parsed.event === "sources") {
               renderSources(assistant.sources, data.sources || []);
-            } else if (parsed.event === "draft") {
+            } else if (parsed.event === "confirmation_required") {
               appendDraftCard(data);
             } else if (parsed.event === "tool") {
               const toolLabels = {
                 get_employee_profile: "正在读取员工信息…",
                 search_knowledge: "正在检索制度依据…",
                 validate_policy: "正在校验制度适用性…",
-                validate_invoice: "正在校验报销资料…",
+                validate_consultation: "正在校验咨询资料…",
                 route_ticket: "正在判断分流队列…",
-                create_ticket_draft: "正在生成工单草稿…",
+                create_ticket_draft: "正在准备建单预览…",
                 request_human_review: "正在创建人工复核…",
                 get_ticket_status: "正在查询工单状态…",
               };
@@ -847,7 +850,11 @@
             } else if (parsed.event === "done") {
               terminalEventReceived = true;
               assistant.cursor.remove();
-              setStatus("回答完成。");
+              setStatus(
+                data.status === "waiting_confirmation"
+                  ? "工单预览已生成，请确认后提交。"
+                  : "回答完成。"
+              );
             } else if (parsed.event === "error") {
               terminalEventReceived = true;
               assistant.cursor.remove();

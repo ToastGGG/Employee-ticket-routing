@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Sequence
@@ -84,7 +86,7 @@ class AgentRunState:
     evidence: dict[int, Citation] = field(default_factory=dict)
     citations: list[Citation] = field(default_factory=list)
     policy_token: str | None = None
-    invoice_token: str | None = None
+    consultation_token: str | None = None
     route_token: str | None = None
     route_data: dict[str, Any] | None = None
     draft: dict[str, Any] | None = None
@@ -126,7 +128,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "search_knowledge",
             "description": (
-                "检索薪酬福利、制度或报销政策。返回带版本和有效期的证据。"
+                "检索薪酬福利、社保公积金、假期或入职调薪制度。返回带版本和有效期的证据。"
                 "涉及政策事实时必须使用此工具。"
             ),
             "strict": True,
@@ -138,8 +140,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "string",
                         "enum": [
                             "salary_benefit",
-                            "reimbursement",
                             "attendance",
+                            "insurance",
+                            "employment_change",
                             "other",
                         ],
                     },
@@ -181,32 +184,40 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "validate_invoice",
+            "name": "validate_consultation",
             "description": (
-                "报销或费用类工单的强制校验。"
-                "需先通过 validate_policy，校验金额、日期、费用类型和附件。"
+                "校验员工薪酬福利咨询工单是否具备提交条件。"
+                "必须基于已通过的政策校验，检查咨询主题、具体诉求和适用信息；"
+                "资料不足时返回缺失项，高风险事项返回人工复核标记。"
             ),
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
                     "policy_validation_token": {"type": "string"},
-                    "invoice_file_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
+                    "topic": {
+                        "type": "string",
+                        "enum": [
+                            "new_hire_compensation",
+                            "salary_change",
+                            "bonus",
+                            "benefits",
+                            "social_insurance",
+                            "housing_fund",
+                            "leave",
+                            "other",
+                        ],
                     },
-                    "amount": {"type": "number", "minimum": 0},
-                    "currency": {"type": "string"},
-                    "expense_type": {"type": "string"},
-                    "occurred_at": {"type": "string"},
+                    "details": {"type": "string"},
+                    "requested_effective_date": {
+                        "type": "string"
+                    },
                 },
                 "required": [
                     "policy_validation_token",
-                    "invoice_file_ids",
-                    "amount",
-                    "currency",
-                    "expense_type",
-                    "occurred_at",
+                    "topic",
+                    "details",
+                    "requested_effective_date",
                 ],
                 "additionalProperties": False,
             },
@@ -217,8 +228,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "route_ticket",
             "description": (
-                "基于已通过的制度/发票校验确定队列、优先级和人工风险。"
-                "报销类工单必须提供通过的 invoice_validation_token。"
+                "基于已通过的制度校验和咨询资料校验，确定员工服务队列、"
+                "优先级及是否需要人工处理。"
             ),
             "strict": True,
             "parameters": {
@@ -226,12 +237,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "properties": {
                     "case_type": {
                         "type": "string",
-                        "enum": ["reimbursement", "salary_benefit", "other"],
+                        "enum": [
+                            "compensation",
+                            "benefits",
+                            "social_insurance",
+                            "employment_change",
+                            "other",
+                        ],
                     },
                     "policy_validation_token": {"type": "string"},
-                    "invoice_validation_token": {
-                        "anyOf": [{"type": "string"}, {"type": "null"}]
-                    },
+                    "consultation_validation_token": {"type": "string"},
                     "risk_flags": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -240,7 +255,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "required": [
                     "case_type",
                     "policy_validation_token",
-                    "invoice_validation_token",
+                    "consultation_validation_token",
                     "risk_flags",
                 ],
                 "additionalProperties": False,
@@ -252,8 +267,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "create_ticket_draft",
             "description": (
-                "创建可编辑但未提交的工单草稿。"
-                "必须持有 route_ticket 签发的 routing_token。"
+                "拟创建薪酬福利咨询工单草稿。Harness 会在真正执行前暂停，"
+                "将标题和说明流式展示给员工确认；确认后才写入数据库。"
             ),
             "strict": True,
             "parameters": {
@@ -437,8 +452,8 @@ class AgentToolExecutor:
                 return await self._search_knowledge(call_id, arguments)
             if name == "validate_policy":
                 return await self._validate_policy(call_id, arguments)
-            if name == "validate_invoice":
-                return await self._validate_invoice(call_id, arguments)
+            if name == "validate_consultation":
+                return await self._validate_consultation(call_id, arguments)
             if name == "route_ticket":
                 return await self._route_ticket(call_id, arguments)
             if name == "create_ticket_draft":
@@ -607,16 +622,19 @@ class AgentToolExecutor:
             citations=selected,
         )
 
-    async def _validate_invoice(
+    async def _validate_consultation(
         self,
         call_id: str,
         arguments: dict[str, Any],
     ) -> ToolExecution:
         """
-        报销工单校验。
+        校验薪酬福利咨询工单的“可提交性”。
 
-        当前原型校验金额、日期、费用类型和附件 ID 是否完整；正式系统应把
-        费用标准接入结构化政策规则表，而不是从自然语言中猜测规则。
+        该工具不判断员工最终能否获得某项待遇，只检查工单是否具备：
+        1. 本轮有效的制度依据；
+        2. 可执行的咨询主题；
+        3. 足以让服务人员处理的具体诉求；
+        4. 是否需要因劳动争议、个人例外等风险转人工。
         """
 
         policy_token = str(arguments.get("policy_validation_token") or "")
@@ -630,94 +648,95 @@ class AgentToolExecutor:
         except ValueError as exc:
             raise AgentToolError(
                 "POLICY_VALIDATION_REQUIRED",
-                "报销校验前必须先通过 validate_policy。",
+                "咨询资料校验前必须先通过 validate_policy。",
             ) from exc
 
-        invoice_ids = arguments.get("invoice_file_ids")
-        amount = arguments.get("amount")
-        currency = str(arguments.get("currency") or "").upper()
-        expense_type = str(arguments.get("expense_type") or "").strip()
-        occurred_at = str(arguments.get("occurred_at") or "").strip()
+        topic = str(arguments.get("topic") or "").strip()
+        details = str(arguments.get("details") or "").strip()
+        effective_date = str(
+            arguments.get("requested_effective_date") or ""
+        ).strip()
         missing: list[str] = []
-        checks = []
+        checks: list[dict[str, Any]] = []
 
-        if not isinstance(invoice_ids, list) or not invoice_ids:
-            missing.append("invoice_file_ids")
-            checks.append({"name": "发票附件", "passed": False})
+        if not topic:
+            missing.append("咨询主题")
+            checks.append({"name": "咨询主题", "passed": False})
         else:
-            checks.append({"name": "发票附件", "passed": True})
+            # “other” 仍可作为合法主题，但具体诉求必须足够清楚，避免
+            # 把无法分流的空泛工单直接送入队列。
+            checks.append({"name": "咨询主题", "passed": True})
 
-        if not isinstance(amount, (int, float)) or float(amount) < 0:
-            missing.append("amount")
-            checks.append({"name": "金额", "passed": False})
+        if len(details) < 6:
+            missing.append("具体诉求")
+            checks.append({"name": "具体诉求", "passed": False})
         else:
-            checks.append({"name": "金额", "passed": True})
+            checks.append({"name": "具体诉求", "passed": True})
 
-        if currency != "CNY":
-            missing.append("currency")
-            checks.append({"name": "币种", "passed": False})
-        else:
-            checks.append({"name": "币种", "passed": True})
+        if effective_date:
+            try:
+                datetime.fromisoformat(effective_date)
+                checks.append({"name": "期望生效日期", "passed": True})
+            except ValueError:
+                missing.append("期望生效日期")
+                checks.append({"name": "期望生效日期", "passed": False})
 
-        if not expense_type:
-            missing.append("expense_type")
-            checks.append({"name": "费用类型", "passed": False})
-        else:
-            checks.append({"name": "费用类型", "passed": True})
-
-        try:
-            datetime.fromisoformat(occurred_at)
-            date_valid = True
-        except ValueError:
-            date_valid = False
-        if not date_valid:
-            missing.append("occurred_at")
-            checks.append({"name": "发生日期", "passed": False})
-        else:
-            checks.append({"name": "发生日期", "passed": True})
+        # 这些场景涉及个人权益、劳动争议或制度例外，不能由智能体直接承诺。
+        risk_rules = {
+            "salary_exception": ("调薪", "薪资调整", "例外", "个人特殊"),
+            "labor_dispute": ("劳动仲裁", "投诉", "申诉", "争议"),
+            "separation_compensation": ("离职补偿", "裁员", "解除劳动"),
+            "work_injury": ("工伤", "医疗期"),
+            "social_insurance_retroactive": ("社保补缴", "公积金补缴"),
+        }
+        combined_text = f"{self.request_question}\n{details}"
+        risk_flags = sorted(
+            {
+                flag
+                for flag, keywords in risk_rules.items()
+                if any(keyword in combined_text for keyword in keywords)
+            }
+        )
 
         if missing:
             return self._success(
                 call_id=call_id,
-                name="validate_invoice",
+                name="validate_consultation",
                 data={
                     "passed": False,
                     "validation_id": None,
                     "validation_token": None,
                     "checks": checks,
                     "missing_fields": missing,
-                    "reason": "报销资料不完整，不能创建工单草稿。",
+                    "risk_flags": risk_flags,
+                    "reason": "咨询资料不完整，暂不能创建工单草稿。",
                 },
                 citations=list(self.state.evidence.values()),
             )
 
-        threshold = float(os.getenv("INVOICE_HUMAN_REVIEW_THRESHOLD", "3000"))
-        risk_flags = ["amount_over_threshold"] if float(amount) >= threshold else []
         payload = {
             "policy_jti": policy_claims["jti"],
-            "invoice_file_ids": invoice_ids,
-            "amount": float(amount),
-            "currency": currency,
-            "expense_type": expense_type,
-            "occurred_at": occurred_at,
+            "topic": topic,
+            "details": details[:1000],
+            "requested_effective_date": effective_date,
             "risk_flags": risk_flags,
         }
         token = self.token_service.create(
-            token_type="invoice",
+            token_type="consultation",
             user_id=str(self.user["id"]),
             case_id=self.conversation_id,
             payload=payload,
         )
         decoded = self.token_service.decode(
             token,
-            expected_type="invoice",
+            expected_type="consultation",
             user_id=str(self.user["id"]),
             case_id=self.conversation_id,
         )
-        self.state.invoice_token = token
+        self.state.consultation_token = token
         return self._success(
             call_id=call_id,
-            name="validate_invoice",
+            name="validate_consultation",
             data={
                 "passed": True,
                 "validation_id": decoded["jti"],
@@ -725,7 +744,7 @@ class AgentToolExecutor:
                 "checks": checks,
                 "missing_fields": [],
                 "risk_flags": risk_flags,
-                "reason": "报销基础字段和附件引用完整。",
+                "reason": "咨询主题、具体诉求和制度适用性已完成校验。",
             },
             citations=list(self.state.evidence.values()),
         )
@@ -735,12 +754,18 @@ class AgentToolExecutor:
         call_id: str,
         arguments: dict[str, Any],
     ) -> ToolExecution:
-        """依据校验结果和风险标志签发 routing Token。"""
+        """
+        依据制度与咨询资料双校验结果签发 routing Token。
+
+        routing Token 是本轮唯一可以进入 create_ticket_draft 的凭证。
+        policy 和 consultation 凭证在路由时立即消费，防止跨案件重放。
+        """
 
         case_type = str(arguments.get("case_type") or "other")
         policy_token = str(arguments.get("policy_validation_token") or "")
-        invoice_token_raw = arguments.get("invoice_validation_token")
-        invoice_token = str(invoice_token_raw) if invoice_token_raw else None
+        consultation_token = str(
+            arguments.get("consultation_validation_token") or ""
+        )
         risk_flags = arguments.get("risk_flags")
         if not isinstance(risk_flags, list):
             risk_flags = []
@@ -759,57 +784,41 @@ class AgentToolExecutor:
                 "路由前必须提供有效的制度校验凭证。",
             ) from exc
 
-        invoice_claims = None
-        if invoice_token:
-            try:
-                invoice_claims = self.token_service.decode(
-                    invoice_token,
-                    expected_type="invoice",
-                    user_id=str(self.user["id"]),
-                    case_id=self.conversation_id,
-                )
-            except ValueError as exc:
-                raise AgentToolError(
-                    "INVOICE_VALIDATION_REQUIRED",
-                    "报销校验凭证无效或已过期。",
-                ) from exc
+        try:
+            consultation_claims = self.token_service.decode(
+                consultation_token,
+                expected_type="consultation",
+                user_id=str(self.user["id"]),
+                case_id=self.conversation_id,
+            )
+        except ValueError as exc:
+            raise AgentToolError(
+                "CONSULTATION_VALIDATION_REQUIRED",
+                "路由前必须通过 validate_consultation 补齐咨询事实。",
+            ) from exc
 
-        if case_type == "reimbursement" and invoice_claims is None:
-            raise AgentToolError(
-                "INVOICE_VALIDATION_REQUIRED",
-                "报销类工单必须先通过 validate_invoice。",
-            )
-        inferred_reimbursement = any(
-            keyword in self.request_question
-            for keyword in ("报销", "发票", "票据", "附件 file", "附件file")
-        )
-        if inferred_reimbursement and case_type != "reimbursement":
-            raise AgentToolError(
-                "CASE_TYPE_MISMATCH",
-                "咨询内容涉及报销或发票，不能改标为其他工单类型来绕过校验。",
-            )
-        if (
-            invoice_claims is not None
-            and str(invoice_claims.get("payload", {}).get("policy_jti") or "")
-            != str(policy_claims["jti"])
+        consultation_payload = consultation_claims.get("payload", {})
+        if str(consultation_payload.get("policy_jti") or "") != str(
+            policy_claims["jti"]
         ):
             raise AgentToolError(
-                "INVOICE_POLICY_MISMATCH",
-                "发票校验凭证与当前制度校验不属于同一轮处理。",
+                "CONSULTATION_POLICY_MISMATCH",
+                "咨询资料校验与当前制度依据不属于同一轮处理。",
             )
 
-        invoice_risk = (
-            invoice_claims.get("payload", {}).get("risk_flags", [])
-            if invoice_claims
-            else []
-        )
-        all_risk = sorted(set(risk_flags + list(invoice_risk)))
+        consultation_risk = consultation_payload.get("risk_flags", [])
+        if not isinstance(consultation_risk, list):
+            consultation_risk = []
+        all_risk = sorted(set(risk_flags + [str(item) for item in consultation_risk]))
         requires_human = bool(all_risk)
-        queue = (
-            "finance_review"
-            if case_type == "reimbursement"
-            else "employee_services"
-        )
+        queue_map = {
+            "compensation": "compensation_benefits",
+            "benefits": "compensation_benefits",
+            "social_insurance": "social_insurance",
+            "employment_change": "employee_services",
+            "other": "employee_services",
+        }
+        queue = queue_map.get(case_type, "employee_services")
         priority = "high" if requires_human else "normal"
 
         # 校验 Token 在进入路由后立即消费，不能用于另一案件或第二次路由。
@@ -821,19 +830,21 @@ class AgentToolExecutor:
             purpose="route_ticket",
         ):
             raise AgentToolError("TOKEN_REPLAYED", "制度校验凭证已被使用。")
-        if invoice_claims and not await self.database.consume_tool_token(
-            jti=str(invoice_claims["jti"]),
+        if not await self.database.consume_tool_token(
+            jti=str(consultation_claims["jti"]),
             user_id=str(self.user["id"]),
             case_id=self.conversation_id,
-            token_type="invoice",
+            token_type="consultation",
             purpose="route_ticket",
         ):
-            raise AgentToolError("TOKEN_REPLAYED", "报销校验凭证已被使用。")
+            raise AgentToolError("TOKEN_REPLAYED", "咨询资料校验凭证已被使用。")
 
         route_payload = {
             "case_type": case_type,
             "policy_jti": policy_claims["jti"],
-            "invoice_jti": invoice_claims["jti"] if invoice_claims else None,
+            "consultation_jti": consultation_claims["jti"],
+            "topic": consultation_payload.get("topic"),
+            "details": consultation_payload.get("details"),
             "queue": queue,
             "priority": priority,
             "requires_human": requires_human,
@@ -864,16 +875,20 @@ class AgentToolExecutor:
             citations=list(self.state.evidence.values()),
         )
 
-    async def _create_ticket_draft(
+    def prepare_ticket_draft(
         self,
+        *,
         call_id: str,
         arguments: dict[str, Any],
-    ) -> ToolExecution:
+    ) -> dict[str, Any]:
         """
-        创建工单草稿。
+        对 create_ticket_draft 做“零副作用预检查”。
 
-        报销类草稿要求 routing Token 内包含 invoice_jti；如果模型省略
-        validate_invoice 或校验失败，route_ticket 不会签发此 Token。
+        Harness 在真正执行工具前调用本方法：
+        - 验证 routing Token 和员工归属；
+        - 阻止高风险工单进入普通建单；
+        - 生成员工可阅读的安全预览；
+        - 不消费 Token、不写数据库。
         """
 
         routing_token = str(arguments.get("routing_token") or "")
@@ -891,16 +906,80 @@ class AgentToolExecutor:
             ) from exc
 
         payload = claims.get("payload", {})
-        if payload.get("case_type") == "reimbursement" and not payload.get("invoice_jti"):
+        if not payload.get("policy_jti") or not payload.get("consultation_jti"):
             raise AgentToolError(
-                "INVOICE_VALIDATION_REQUIRED",
-                "报销工单草稿必须在 validate_invoice 通过后创建。",
+                "CONSULTATION_VALIDATION_REQUIRED",
+                "路由凭证缺少制度或咨询资料校验，不能创建工单。",
+            )
+        if payload.get("requires_human"):
+            raise AgentToolError(
+                "HUMAN_REVIEW_REQUIRED",
+                "当前事项存在高风险，只能转人工处理，不能创建普通工单。",
+            )
+        title = str(arguments.get("title") or "").strip()
+        description = str(arguments.get("description") or "").strip()
+        if not title or not description:
+            raise AgentToolError(
+                "DRAFT_CONTENT_REQUIRED",
+                "工单标题和说明不能为空。",
+            )
+        attachment_ids = [
+            str(item)
+            for item in arguments.get("attachment_ids", [])
+            if str(item).strip()
+        ]
+        return {
+            "call_id": call_id,
+            "title": title,
+            "description": description,
+            "category": str(payload.get("case_type") or "other"),
+            "topic": payload.get("topic"),
+            "queue": payload.get("queue"),
+            "priority": payload.get("priority"),
+            "attachment_ids": attachment_ids,
+        }
+
+    async def _create_ticket_draft(
+        self,
+        call_id: str,
+        arguments: dict[str, Any],
+    ) -> ToolExecution:
+        """
+        创建薪酬福利咨询工单草稿。
+
+        本方法只会在员工确认后由确认接口执行。routing Token 同时绑定
+        policy 与 consultation 校验，缺少任一前置步骤都无法取得。
+        """
+
+        routing_token = str(arguments.get("routing_token") or "")
+        try:
+            claims = self.token_service.decode(
+                routing_token,
+                expected_type="routing",
+                user_id=str(self.user["id"]),
+                case_id=self.conversation_id,
+            )
+        except ValueError as exc:
+            raise AgentToolError(
+                "ROUTING_REQUIRED",
+                "创建工单草稿前必须完成路由校验。",
+            ) from exc
+
+        payload = claims.get("payload", {})
+        if not payload.get("policy_jti") or not payload.get("consultation_jti"):
+            raise AgentToolError(
+                "CONSULTATION_VALIDATION_REQUIRED",
+                "创建工单前必须同时通过制度校验和咨询资料校验。",
             )
         if payload.get("requires_human"):
             raise AgentToolError(
                 "HUMAN_REVIEW_REQUIRED",
                 "当前工单存在高风险，必须转人工处理，不能自动创建草稿。",
             )
+        title = str(arguments.get("title") or "").strip()
+        description = str(arguments.get("description") or "").strip()
+        if not title or not description:
+            raise AgentToolError("DRAFT_CONTENT_REQUIRED", "工单标题和描述不能为空。")
         if not await self.database.consume_tool_token(
             jti=str(claims["jti"]),
             user_id=str(self.user["id"]),
@@ -909,11 +988,6 @@ class AgentToolExecutor:
             purpose="create_ticket_draft",
         ):
             raise AgentToolError("TOKEN_REPLAYED", "路由凭证已被使用。")
-
-        title = str(arguments.get("title") or "").strip()
-        description = str(arguments.get("description") or "").strip()
-        if not title or not description:
-            raise AgentToolError("DRAFT_CONTENT_REQUIRED", "工单标题和描述不能为空。")
         attachment_ids = [
             str(item)
             for item in arguments.get("attachment_ids", [])
@@ -921,7 +995,7 @@ class AgentToolExecutor:
         ]
         validation_summary = {
             "policy_jti": payload.get("policy_jti"),
-            "invoice_jti": payload.get("invoice_jti"),
+            "consultation_jti": payload.get("consultation_jti"),
             "routing_jti": str(claims["jti"]),
             "queue": payload.get("queue"),
             "priority": payload.get("priority"),
@@ -962,6 +1036,7 @@ class AgentToolExecutor:
                 "status": draft["status"],
                 "title": title,
                 "description": description,
+                "topic": payload.get("topic"),
                 "priority": payload.get("priority"),
                 "queue": payload.get("queue"),
                 "expires_at": draft["expires_at"],
@@ -1090,7 +1165,8 @@ class OpenAICompatibleToolClient:
             "messages": list(messages),
             "tools": list(tools),
             "tool_choice": "auto",
-            "parallel_tool_calls": False,
+            # 允许多工具规划；Harness 仍按依赖顺序串行执行，不并发。
+            "parallel_tool_calls": True,
             "temperature": 0.1,
         }
         timeout = httpx.Timeout(
@@ -1240,28 +1316,73 @@ class MockToolCallingClient:
                 ),
             )
 
+        def infer_domain() -> str:
+            if any(word in question for word in ("社保", "公积金", "医保", "养老")):
+                return "insurance"
+            if any(word in question for word in ("假期", "考勤", "请假")):
+                return "attendance"
+            if any(word in question for word in ("入职", "转正", "调岗", "离职")):
+                return "employment_change"
+            return "salary_benefit"
+
+        def infer_topic() -> str:
+            if "入职" in question:
+                return "new_hire_compensation"
+            if any(word in question for word in ("调薪", "涨薪", "薪资调整")):
+                return "salary_change"
+            if any(word in question for word in ("奖金", "绩效")):
+                return "bonus"
+            if "公积金" in question:
+                return "housing_fund"
+            if any(word in question for word in ("社保", "医保", "养老")):
+                return "social_insurance"
+            if any(word in question for word in ("假期", "请假", "年假")):
+                return "leave"
+            if any(word in question for word in ("福利", "补贴", "体检", "年金")):
+                return "benefits"
+            return "other"
+
+        def infer_case_type() -> str:
+            topic = infer_topic()
+            if topic in {"social_insurance", "housing_fund", "leave"}:
+                return "social_insurance"
+            if topic in {"benefits", "bonus"}:
+                return "benefits"
+            if topic in {"new_hire_compensation", "salary_change"}:
+                return "compensation"
+            return "other"
+
         if latest_name is None:
-            return call(
-                "get_employee_profile",
-                {"include": ["employment_type", "region", "policy_group"]},
+            # 第一轮同时规划“身份上下文 + 制度检索”。Harness 会按安全
+            # 顺序执行，因此这是两个顺序工具调用，不是并行读取。
+            return ModelTurn(
+                content="",
+                tool_calls=(
+                    ModelToolCall(
+                        call_id=f"mock_profile_{len(messages)}",
+                        name="get_employee_profile",
+                        arguments={
+                            "include": [
+                                "employment_type",
+                                "region",
+                                "policy_group",
+                            ]
+                        },
+                    ),
+                    ModelToolCall(
+                        call_id=f"mock_search_{len(messages)}",
+                        name="search_knowledge",
+                        arguments={
+                            "query": question or "薪酬福利制度",
+                            "domain": infer_domain(),
+                            "top_k": 3,
+                        },
+                    ),
+                ),
             )
 
         data = latest_result.get("data", {})
         data = data if isinstance(data, dict) else {}
-        if latest_name == "get_employee_profile":
-            return call(
-                "search_knowledge",
-                {
-                    "query": question or "薪酬福利制度",
-                    "domain": (
-                        "reimbursement"
-                        if "报销" in question
-                        else "salary_benefit"
-                    ),
-                    "top_k": 3,
-                },
-            )
-
         if latest_name == "search_knowledge":
             evidence = data.get("evidence", [])
             if not isinstance(evidence, list) or not evidence:
@@ -1289,17 +1410,18 @@ class MockToolCallingClient:
                     content="制度校验未通过，需要补充资料或转人工确认。"
                 )
 
-            wants_ticket = any(
-                keyword in question
-                for keyword in [
-                    "创建工单",
-                    "建单",
-                    "提交工单",
-                    "发起工单",
-                    "申请报销",
-                    "提交一笔",
-                ]
+            # 只有明确的“执行型”表达才进入建单链路；“能不能提交”
+            # 属于制度咨询，不能误解为员工已经授权创建工单。
+            action_phrases = (
+                "帮我提交",
+                "请帮我提交",
+                "帮我建单",
+                "请创建工单",
+                "我要提交",
+                "发起工单",
+                "请提交工单",
             )
+            wants_ticket = any(phrase in question for phrase in action_phrases)
             if not wants_ticket:
                 search_result = _find_tool_result(messages, "search_knowledge")
                 search_data = search_result.get("data", {})
@@ -1321,54 +1443,71 @@ class MockToolCallingClient:
                     )
                 )
 
-            if "报销" in question:
-                amount_match = re.search(r"(\d+(?:\.\d+)?)\s*元", question)
-                amount = float(amount_match.group(1)) if amount_match else 0
-                raw_file_ids = re.findall(
-                    r"(?:file|附件)[_-]([A-Za-z0-9_-]+)",
-                    question,
+            # “帮我提交我的咨询工单”本身没有说明要咨询什么，必须让员工
+            # 补充具体诉求，不能仅凭一句建单指令生成空泛工单。
+            stripped = question
+            for phrase in action_phrases:
+                stripped = stripped.replace(phrase, "")
+            stripped = re.sub(
+                r"(我的)?(咨询)?工单|请|帮我|提交|创建|发起|[:：,，。\s]",
+                "",
+                stripped,
+            )
+            has_specific_need = len(stripped) >= 8 and any(
+                word in question
+                for word in (
+                    "入职",
+                    "薪酬",
+                    "工资",
+                    "调薪",
+                    "奖金",
+                    "福利",
+                    "保险",
+                    "补贴",
+                    "体检",
+                    "年金",
+                    "社保",
+                    "公积金",
+                    "医保",
+                    "年假",
+                    "假期",
+                    "考勤",
                 )
-                invoice_file_ids = [
-                    item if item.startswith("file_") else f"file_{item}"
-                    for item in raw_file_ids
-                ]
-                date_match = re.search(r"20\d{2}-\d{2}-\d{2}", question)
-                return call(
-                    "validate_invoice",
-                    {
-                        "policy_validation_token": str(
-                            data.get("validation_token") or ""
-                        ),
-                        "invoice_file_ids": invoice_file_ids,
-                        "amount": amount,
-                        "currency": "CNY",
-                        "expense_type": "travel",
-                        "occurred_at": (
-                            date_match.group(0) if date_match else ""
-                        ),
-                    },
+            )
+            if not has_specific_need:
+                return ModelTurn(
+                    content=(
+                        "可以。为了准确分流，请补充：\n"
+                        "1. 要咨询的薪酬或福利事项；\n"
+                        "2. 你的具体诉求或希望确认的结果；\n"
+                        "3. 与事项相关的日期（如入职日、调薪生效日，可不填）。"
+                    )
                 )
+
+            date_match = re.search(r"20\d{2}-\d{2}-\d{2}", question)
             return call(
-                "route_ticket",
+                "validate_consultation",
                 {
-                    "case_type": "salary_benefit",
                     "policy_validation_token": str(
                         data.get("validation_token") or ""
                     ),
-                    "invoice_validation_token": None,
-                    "risk_flags": [],
+                    "topic": infer_topic(),
+                    "details": stripped,
+                    "requested_effective_date": (
+                        date_match.group(0) if date_match else ""
+                    ),
                 },
             )
 
-        if latest_name == "validate_invoice":
+        if latest_name == "validate_consultation":
             if not data.get("passed"):
                 missing = "、".join(
                     str(item) for item in data.get("missing_fields", [])
                 )
                 return ModelTurn(
                     content=(
-                        "报销资料尚不完整，暂时不能创建工单草稿。"
-                        f"需要补充：{missing or '发票附件、金额或发生日期'}。"
+                        "咨询信息尚不完整，暂时不能创建工单。"
+                        f"请补充：{missing or '具体诉求'}。"
                     )
                 )
             policy_result = _find_tool_result(messages, "validate_policy")
@@ -1376,11 +1515,11 @@ class MockToolCallingClient:
             return call(
                 "route_ticket",
                 {
-                    "case_type": "reimbursement",
+                    "case_type": infer_case_type(),
                     "policy_validation_token": str(
                         policy_data.get("validation_token") or ""
                     ),
-                    "invoice_validation_token": str(
+                    "consultation_validation_token": str(
                         data.get("validation_token") or ""
                     ),
                     "risk_flags": data.get("risk_flags", []),
@@ -1393,7 +1532,7 @@ class MockToolCallingClient:
                     "request_human_review",
                     {
                         "reason_code": "HIGH_RISK",
-                        "reason": "工单金额或风险规则达到人工复核阈值。",
+                        "reason": "该事项涉及个人权益、劳动争议或制度例外，需要人工复核。",
                         "evidence_ids": [],
                     },
                 )
@@ -1404,7 +1543,7 @@ class MockToolCallingClient:
                     "title": question[:80] or "员工薪酬福利咨询",
                     "description": (
                         f"员工咨询：{question}\n"
-                        "系统已完成制度、报销字段和路由校验。"
+                        "系统已完成制度、咨询资料和分流规则校验。"
                     ),
                     "attachment_ids": [],
                 },
@@ -1413,8 +1552,7 @@ class MockToolCallingClient:
         if latest_name == "create_ticket_draft":
             return ModelTurn(
                 content=(
-                    "已生成工单草稿，但尚未正式提交。"
-                    "请核对草稿内容并点击“确认并提交”。"
+                    "工单内容已准备完成，正在等待员工确认。"
                 )
             )
 
@@ -1444,29 +1582,120 @@ class AgentStreamEvent:
 
 RUNTIME_SAFETY_PROMPT = """
 【Agent 运行时安全规则】
-1. 每轮业务咨询必须先调用 get_employee_profile，身份只来自登录会话。
-2. 涉及政策、福利、薪酬或报销事实时，必须调用 search_knowledge，
-   并使用本轮检索返回的 evidence_id 调用 validate_policy。
-3. 涉及报销、发票或费用金额时，必须继续调用 validate_invoice。
-4. 只有 validate_policy 和必要的 validate_invoice 通过，并取得
-   route_ticket 签发的 routing_token 后，才能调用 create_ticket_draft。
-5. 高风险、制度冲突、资料不足、权限不足或用户要求人工时，调用
-   request_human_review，不得绕过校验强行建单。
-6. create_ticket_draft 只生成草稿；正式提交必须由员工在前端明确确认。
-   模型不得声称草稿已提交，也不得把模糊回复视为确认。
+1. 每轮薪酬福利业务咨询必须先调用 get_employee_profile，身份只来自登录会话。
+2. 涉及薪酬、福利、社保、公积金、假期或入职调薪事实时，必须调用
+   search_knowledge，并使用本轮 evidence_id 调用 validate_policy。
+3. 只有员工明确说“帮我提交”“帮我建单”等执行语句时，才进入工单链路；
+   “能不能提交”“流程是什么”等问法只解释制度，不创建工单。
+4. 创建工单前必须依次通过 validate_policy、validate_consultation 和
+   route_ticket。资料不足时先向员工索取缺失信息，不得生成空泛工单。
+5. 高风险、劳动争议、个人例外、制度冲突或用户要求人工时，调用
+   request_human_review，不得强行创建普通工单。
+6. Harness 拦截 create_ticket_draft：员工确认前工具不得执行。模型不得
+   声称工单已创建或已提交，也不得把模糊回复视为确认。
 7. 不得伪造、复用或跨会话使用任何 validation_token。
 8. 工具失败时如实说明，不得声称未实际成功的动作已经完成。
-9. 最终回答只使用本轮工具返回的制度证据；没有证据时明确说明
-   “制度中未找到”，不得编造报销标准。
+9. 最终回答只使用本轮制度证据；没有证据时明确说明“制度中未找到”，
+   不得编造薪酬、奖金、社保、公积金或其他福利标准。
+10. 为满足最多 5 轮限制，第一轮应同时规划 get_employee_profile 和
+    search_knowledge；Harness 会按安全顺序执行。
 """
 
 
-class AgentRunner:
-    """
-    执行“模型决策 → 工具调用 → 结果回填 → 最终回答”的自主循环。
+@dataclass
+class AgentPendingConfirmation:
+    """等待员工确认的建单动作。"""
 
-    模型拥有选择下一步工具的自由，但工具依赖、用户身份、数据归属和
-    一次性凭证均由服务端强制执行。提示词不是唯一的安全边界。
+    confirmation_id: str
+    user_id: str
+    conversation_id: str
+    request_id: str
+    question: str
+    round_no: int
+    arguments: dict[str, Any]
+    preview: dict[str, Any]
+    expires_at: datetime
+
+
+class PendingConfirmationStore:
+    """
+    建草稿前的人工确认中断点。
+
+    当前原型为单进程内存存储，适合最小验证；正式多实例部署时应替换为
+    Redis，并使用服务端加密保存 routing_token。浏览器永远拿不到 Token。
+    """
+
+    def __init__(self, *, ttl_seconds: int = 600):
+        self._ttl_seconds = ttl_seconds
+        self._items: dict[str, AgentPendingConfirmation] = {}
+        self._lock = asyncio.Lock()
+
+    def _cleanup(self) -> None:
+        now = datetime.now(timezone.utc)
+        expired = [
+            key
+            for key, pending in self._items.items()
+            if pending.expires_at <= now
+        ]
+        for key in expired:
+            self._items.pop(key, None)
+
+    async def put(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        request_id: str,
+        question: str,
+        round_no: int,
+        arguments: dict[str, Any],
+        preview: dict[str, Any],
+    ) -> AgentPendingConfirmation:
+        async with self._lock:
+            self._cleanup()
+            confirmation_id = str(uuid.uuid4())
+            pending = AgentPendingConfirmation(
+                confirmation_id=confirmation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                request_id=request_id,
+                question=question,
+                round_no=round_no,
+                arguments=dict(arguments),
+                preview=dict(preview),
+                expires_at=datetime.now(timezone.utc)
+                + timedelta(seconds=self._ttl_seconds),
+            )
+            self._items[confirmation_id] = pending
+            return pending
+
+    async def take(
+        self,
+        *,
+        confirmation_id: str,
+        user_id: str,
+    ) -> AgentPendingConfirmation | None:
+        """
+        一次性取出待确认动作。
+
+        先移除再执行，防止双击确认或并发请求重复消费同一个 routing Token。
+        """
+
+        async with self._lock:
+            self._cleanup()
+            pending = self._items.get(confirmation_id)
+            if pending is None or pending.user_id != user_id:
+                return None
+            return self._items.pop(confirmation_id)
+
+
+class AgentHarness:
+    """
+    轻量、供应商无关的 Agent Harness。
+
+    选择 Harness 而非把状态机拆进通用 Agent SDK，是因为本系统有强顺序、
+    一次性凭证、SSE 中断确认和中文审计需求。Harness 负责四步循环：
+    模型决策 → 安全排序并执行工具 → 结果回填 → 再决策。
     """
 
     def __init__(
@@ -1479,6 +1708,7 @@ class AgentRunner:
         conversation_id: str,
         system_prompt: str,
         question: str,
+        pending_store: PendingConfirmationStore,
     ):
         self.database = database
         self.runtime = runtime
@@ -1491,7 +1721,13 @@ class AgentRunner:
             request_question=question,
         )
         self.system_prompt = system_prompt
-        self.max_steps = max(int(os.getenv("AGENT_MAX_STEPS", "12")), 1)
+        self.question = question
+        self.pending_store = pending_store
+        # 业务硬限制最多 5 轮；环境变量只能调小，不能突破。
+        self.max_rounds = min(
+            max(int(os.getenv("AGENT_MAX_ROUNDS", "5")), 1),
+            5,
+        )
 
     def _model_client(self) -> AgentModelClient:
         """按配置创建模型适配器；离线模式使用可重复验证的 Mock。"""
@@ -1524,8 +1760,14 @@ class AgentRunner:
         """
         运行工具调用循环并产出 SSE 业务事件。
 
-        模型每轮只能从已注册工具中选择动作；工具返回结构会作为 tool 消息
-        回填。达到最大步数时失败关闭，避免无限自主循环。
+        每一轮都会：
+        1. 请求模型产生文本或工具调用；
+        2. 按服务端安全优先级执行工具；
+        3. 将脱敏结果写入 agent_decision_logs；
+        4. 把工具结果回填给模型继续决策。
+
+        遇到 create_ticket_draft 时立即中断循环，只流式发送预览。员工确认
+        后由独立确认接口执行工具，模型无法替员工越过该确认点。
         """
 
         messages: list[dict[str, Any]] = [
@@ -1542,7 +1784,18 @@ class AgentRunner:
         client = self._model_client()
         final_answer = ""
 
-        for _ in range(self.max_steps):
+        tool_order = {
+            "get_employee_profile": 10,
+            "search_knowledge": 20,
+            "validate_policy": 30,
+            "validate_consultation": 40,
+            "route_ticket": 50,
+            "request_human_review": 60,
+            "get_ticket_status": 60,
+            "create_ticket_draft": 70,
+        }
+
+        for round_no in range(1, self.max_rounds + 1):
             turn = await client.complete(messages, TOOL_DEFINITIONS)
             if turn.tool_calls:
                 raw_assistant = turn.raw_assistant_message or {
@@ -1565,7 +1818,16 @@ class AgentRunner:
                 }
                 messages.append(raw_assistant)
 
-                for tool_call in turn.tool_calls:
+                # 模型可以在一轮返回多个工具。Harness 按依赖顺序重排后
+                # 顺序执行，绝不能把“先 identity、后搜索”交给并发调度。
+                ordered_calls = sorted(
+                    enumerate(turn.tool_calls),
+                    key=lambda item: (
+                        tool_order.get(item[1].name, 999),
+                        item[0],
+                    ),
+                )
+                for _, tool_call in ordered_calls:
                     yield AgentStreamEvent(
                         "status",
                         {
@@ -1574,10 +1836,159 @@ class AgentRunner:
                             "tool": tool_call.name,
                         },
                     )
+
+                    if tool_call.name == "create_ticket_draft":
+                        # 强制人工中断点：只做零副作用预检查，不执行工具。
+                        started_at = time.perf_counter()
+                        try:
+                            preview = self.executor.prepare_ticket_draft(
+                                call_id=tool_call.call_id,
+                                arguments=tool_call.arguments,
+                            )
+                        except AgentToolError as exc:
+                            result = self.executor._failure(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                code=exc.code,
+                                message=exc.message,
+                                details=exc.details,
+                            )
+                            duration_ms = int(
+                                (time.perf_counter() - started_at) * 1000
+                            )
+                            await self.database.write_agent_decision_log(
+                                conversation_id=self.executor.conversation_id,
+                                user_id=str(self.executor.user["id"]),
+                                request_id=request_id,
+                                round_no=round_no,
+                                decision_type="confirmation_precheck_failed",
+                                tool_name=tool_call.name,
+                                arguments=public_tool_payload(
+                                    tool_call.arguments
+                                ),
+                                duration_ms=duration_ms,
+                                result_summary=str(exc.message),
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.call_id,
+                                    "content": json.dumps(
+                                        {
+                                            "tool_name": tool_call.name,
+                                            "result": result.model_payload,
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            )
+                            yield AgentStreamEvent(
+                                "tool",
+                                {
+                                    "name": tool_call.name,
+                                    "ok": False,
+                                    "code": result.public_payload.get("code"),
+                                    "message": str(
+                                        result.public_payload.get("message") or ""
+                                    ),
+                                },
+                            )
+                            continue
+                        else:
+                            pending = await self.pending_store.put(
+                                user_id=str(self.executor.user["id"]),
+                                conversation_id=self.executor.conversation_id,
+                                request_id=request_id,
+                                question=question,
+                                round_no=round_no,
+                                arguments=tool_call.arguments,
+                                preview=preview,
+                            )
+                            duration_ms = int(
+                                (time.perf_counter() - started_at) * 1000
+                            )
+                            await self.database.write_agent_decision_log(
+                                conversation_id=self.executor.conversation_id,
+                                user_id=str(self.executor.user["id"]),
+                                request_id=request_id,
+                                round_no=round_no,
+                                decision_type="confirmation_required",
+                                tool_name=tool_call.name,
+                                arguments=public_tool_payload(
+                                    tool_call.arguments
+                                ),
+                                duration_ms=duration_ms,
+                                result_summary=(
+                                    "已暂停工具执行，等待员工确认："
+                                    f"{preview['title']}"
+                                ),
+                            )
+                            expires_at = pending.expires_at.replace(
+                                microsecond=0
+                            ).isoformat()
+                            preview_text = (
+                                "拟创建薪酬福利咨询工单\n"
+                                f"标题：{preview['title']}\n"
+                                f"业务方向：{preview.get('topic') or preview['category']}\n"
+                                f"处理队列：{preview.get('queue') or '员工服务'}\n"
+                                f"优先级：{preview.get('priority') or 'normal'}\n"
+                                f"咨询说明：\n{preview['description']}\n"
+                                "请核对以上内容。确认后系统才会真正执行建单并提交。"
+                            )
+                            for index in range(0, len(preview_text), 20):
+                                yield AgentStreamEvent(
+                                    "delta",
+                                    {"text": preview_text[index : index + 20]},
+                                )
+                                await asyncio.sleep(0.01)
+                            yield AgentStreamEvent(
+                                "confirmation_required",
+                                {
+                                    "confirmation_id": pending.confirmation_id,
+                                    "title": preview["title"],
+                                    "description": preview["description"],
+                                    "category": preview["category"],
+                                    "topic": preview.get("topic"),
+                                    "queue": preview.get("queue"),
+                                    "priority": preview.get("priority"),
+                                    "expires_at": expires_at,
+                                    "requires_user_confirmation": True,
+                                },
+                            )
+                            if self.executor.state.citations:
+                                yield AgentStreamEvent(
+                                    "sources",
+                                    {
+                                        "sources": [
+                                            citation.to_dict()
+                                            for citation in self.executor.state.citations
+                                        ]
+                                    },
+                                )
+                            return
+
+                    started_at = time.perf_counter()
                     result = await self.executor.execute(
                         call_id=tool_call.call_id,
                         name=tool_call.name,
                         arguments=tool_call.arguments,
+                    )
+                    duration_ms = int(
+                        (time.perf_counter() - started_at) * 1000
+                    )
+                    await self.database.write_agent_decision_log(
+                        conversation_id=self.executor.conversation_id,
+                        user_id=str(self.executor.user["id"]),
+                        request_id=request_id,
+                        round_no=round_no,
+                        decision_type="tool_call",
+                        tool_name=tool_call.name,
+                        arguments=public_tool_payload(tool_call.arguments),
+                        duration_ms=duration_ms,
+                        result_summary=json.dumps(
+                            public_tool_payload(result.public_payload),
+                            ensure_ascii=False,
+                        )[:900],
                     )
                     await self.database.write_audit_log(
                         actor_id=str(self.executor.user["id"]),
@@ -1618,8 +2029,44 @@ class AgentRunner:
                             ),
                         },
                     )
-                    if result.draft is not None:
-                        yield AgentStreamEvent("draft", result.draft)
+                    if (
+                        tool_call.name == "request_human_review"
+                        and result.public_payload.get("ok")
+                    ):
+                        # 转人工是当前问题的终止动作，不需要再消耗第 6 轮
+                        # 让模型重复表述。Harness 直接产出确定性的收尾文本。
+                        terminal_text = (
+                            "该事项涉及个人权益、劳动争议或制度例外，"
+                            "已转给薪酬福利专员人工复核。"
+                            "服务人员会在核实后继续处理，系统不会自动承诺结果。"
+                        )
+                        await self.database.write_agent_decision_log(
+                            conversation_id=self.executor.conversation_id,
+                            user_id=str(self.executor.user["id"]),
+                            request_id=request_id,
+                            round_no=round_no,
+                            decision_type="final_answer",
+                            tool_name=None,
+                            arguments=None,
+                            duration_ms=0,
+                            result_summary=terminal_text,
+                        )
+                        for index in range(0, len(terminal_text), 18):
+                            yield AgentStreamEvent(
+                                "delta",
+                                {"text": terminal_text[index : index + 18]},
+                            )
+                        if self.executor.state.citations:
+                            yield AgentStreamEvent(
+                                "sources",
+                                {
+                                    "sources": [
+                                        citation.to_dict()
+                                        for citation in self.executor.state.citations
+                                    ]
+                                },
+                            )
+                        return
                 continue
 
             candidate = turn.content.strip()
@@ -1644,16 +2091,21 @@ class AgentRunner:
                     }
                 )
                 continue
+            await self.database.write_agent_decision_log(
+                conversation_id=self.executor.conversation_id,
+                user_id=str(self.executor.user["id"]),
+                request_id=request_id,
+                round_no=round_no,
+                decision_type="final_answer",
+                tool_name=None,
+                arguments=None,
+                duration_ms=0,
+                result_summary=candidate[:900],
+            )
             final_answer = candidate
             break
         else:
-            raise RuntimeError("Agent 工具调用超过最大步数，已停止执行。")
-
-        if self.executor.state.draft is not None:
-            final_answer += (
-                "\n\n当前状态：仅为工单草稿，尚未提交。"
-                "请核对后由你本人点击“确认并提交”。"
-            )
+            raise RuntimeError("Agent 决策超过最多 5 轮，已安全停止。")
 
         for index in range(0, len(final_answer), 18):
             yield AgentStreamEvent(
@@ -1670,3 +2122,7 @@ class AgentRunner:
                     ]
                 },
             )
+
+
+# 兼容既有导入路径；实际实现已升级为 Harness。
+AgentRunner = AgentHarness

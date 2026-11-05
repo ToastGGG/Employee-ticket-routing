@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time as timer
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -39,7 +40,12 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 try:
-    from .agent_runtime import AgentRunner
+    from .agent_runtime import (
+        AgentHarness,
+        AgentToolExecutor,
+        PendingConfirmationStore,
+        public_tool_payload,
+    )
     from .db import SQLiteDatabase
     from .ingestion import (
         MAX_FILE_SIZE,
@@ -62,7 +68,12 @@ try:
         load_or_create_jwt_secret,
     )
 except ImportError:
-    from agent_runtime import AgentRunner
+    from agent_runtime import (
+        AgentHarness,
+        AgentToolExecutor,
+        PendingConfirmationStore,
+        public_tool_payload,
+    )
     from db import SQLiteDatabase
     from ingestion import (
         MAX_FILE_SIZE,
@@ -107,7 +118,8 @@ SHANGHAI = timezone(timedelta(hours=8))
 # 实际问答始终从 prompt_templates 表读取，不会在运行时使用此常量。
 DEFAULT_SYSTEM_PROMPT = (
     "你是公司员工薪酬福利咨询工单分流助手，只根据提供的制度条文回答，"
-    "不确定时明确说'制度中未找到'，回答末尾附引用来源，不得编造报销标准。"
+    "不确定时明确说'制度中未找到'，回答末尾附引用来源，"
+    "不得编造薪酬、奖金、社保、公积金或其他福利标准。"
 )
 
 
@@ -141,6 +153,12 @@ class TicketConfirmRequest(BaseModel):
 
     confirmed: bool
     draft_version: int
+
+
+class AgentConfirmationRequest(BaseModel):
+    """员工对建单预览的显式确认。"""
+
+    confirmed: bool
 
 
 class LoginRequest(BaseModel):
@@ -249,6 +267,15 @@ async def lifespan(app: FastAPI):
         password_hash=password_service.hash(employee_password),
     )
     await database.seed_default_prompt(content=DEFAULT_SYSTEM_PROMPT)
+    active_prompt = await database.get_active_prompt()
+    if active_prompt and "报销" in str(active_prompt.get("content") or ""):
+        # 兼容早期版本：只迁移仍含报销专用措辞的活动模板，保留管理员
+        # 已自行编辑过的其他模板。
+        await database.publish_prompt(
+            content=DEFAULT_SYSTEM_PROMPT,
+            change_note="系统升级：切换为员工薪酬福利咨询默认模板",
+            created_by="system",
+        )
 
     runtime = RagRuntime(
         cache_dir=Path(os.getenv("RAG_CACHE_DIR", str(DEFAULT_INDEX_CACHE)))
@@ -284,6 +311,9 @@ async def lifespan(app: FastAPI):
     app.state.runtime = runtime
     app.state.jwt = jwt_service
     app.state.agent_tokens = agent_token_service
+    app.state.pending_confirmations = PendingConfirmationStore(
+        ttl_seconds=int(os.getenv("AGENT_CONFIRMATION_TTL_SECONDS", "600"))
+    )
     app.state.upload_dir = upload_dir
     logger.info(
         "服务初始化完成：documents=%s chunks=%s",
@@ -295,7 +325,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="员工薪酬福利咨询工单分流系统",
-    version="0.3.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -838,7 +868,8 @@ async def chat(
 
         collected: list[str] = []
         citations: list[dict] = []
-        runner = AgentRunner(
+        paused_for_confirmation = False
+        runner = AgentHarness(
             database=app.state.db,
             runtime=app.state.runtime,
             token_service=app.state.agent_tokens,
@@ -846,6 +877,7 @@ async def chat(
             conversation_id=str(conversation["id"]),
             system_prompt=str(prompt_template["content"]),
             question=question,
+            pending_store=app.state.pending_confirmations,
         )
         try:
             yield sse_event(
@@ -871,8 +903,9 @@ async def chat(
                 elif event.event == "sources":
                     citations = list(event.data.get("sources") or [])
                     yield sse_event("sources", {"sources": citations})
-                elif event.event == "draft":
-                    yield sse_event("draft", event.data)
+                elif event.event == "confirmation_required":
+                    paused_for_confirmation = True
+                    yield sse_event("confirmation_required", event.data)
                 else:
                     yield sse_event(event.event, event.data)
 
@@ -894,6 +927,11 @@ async def chat(
                     "history_rounds": min(len(history) // 2, 6),
                     "prompt_version": int(prompt_template["version"]),
                     "request_id": trace_id,
+                    "status": (
+                        "waiting_confirmation"
+                        if paused_for_confirmation
+                        else "completed"
+                    ),
                 },
             )
         except asyncio.CancelledError:
@@ -936,6 +974,135 @@ async def chat(
             "X-Request-ID": trace_id,
         },
     )
+
+
+@app.post("/api/agent/confirmations/{confirmation_id}/confirm")
+async def confirm_agent_ticket(
+    confirmation_id: str,
+    payload: AgentConfirmationRequest,
+    request: Request,
+    x_csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
+    user: CurrentUser = Depends(require_employee),
+):
+    """
+    员工确认后，才真正执行 create_ticket_draft。
+
+    原 SSE 请求只发送预览并结束；本接口一次性取出服务端暂存动作，执行建单
+    工具后立即把草稿标记为 submitted。因此模型无法代替员工越过确认点。
+    """
+
+    if user.authenticated_by_cookie:
+        verify_csrf(request, x_csrf_token)
+    if not payload.confirmed:
+        raise APIError(
+            status_code=422,
+            code="EXPLICIT_CONFIRMATION_REQUIRED",
+            message="请核对工单内容并明确确认后再提交。",
+        )
+
+    pending = await app.state.pending_confirmations.take(
+        confirmation_id=confirmation_id,
+        user_id=user.id,
+    )
+    if pending is None:
+        raise APIError(
+            status_code=404,
+            code="AGENT_CONFIRMATION_NOT_FOUND",
+            message="确认请求不存在、已过期或不属于当前员工。",
+        )
+
+    executor = AgentToolExecutor(
+        database=app.state.db,
+        runtime=app.state.runtime,
+        token_service=app.state.agent_tokens,
+        user=user.record,
+        conversation_id=pending.conversation_id,
+        request_question=pending.question,
+    )
+    started_at = timer.perf_counter()
+    result = await executor.execute(
+        call_id=f"confirmation_{confirmation_id}",
+        name="create_ticket_draft",
+        arguments=pending.arguments,
+    )
+    duration_ms = int((timer.perf_counter() - started_at) * 1000)
+    if not result.public_payload.get("ok") or result.draft is None:
+        await app.state.db.write_agent_decision_log(
+            conversation_id=pending.conversation_id,
+            user_id=user.id,
+            request_id=request_id(request),
+            round_no=pending.round_no,
+            decision_type="confirmation_execution_failed",
+            tool_name="create_ticket_draft",
+            arguments=public_tool_payload(pending.arguments),
+            duration_ms=duration_ms,
+            result_summary=str(result.public_payload.get("message") or "建单失败"),
+        )
+        raise APIError(
+            status_code=409,
+            code=str(result.public_payload.get("code") or "TICKET_CREATE_FAILED"),
+            message=str(
+                result.public_payload.get("message") or "工单创建失败，请重新发起。"
+            ),
+        )
+
+    draft = result.draft
+    submitted = await app.state.db.submit_ticket_draft(
+        draft_id=str(draft["draft_id"]),
+        user_id=user.id,
+        expected_version=int(draft["draft_version"]),
+    )
+    if submitted is None:
+        raise APIError(
+            status_code=409,
+            code="DRAFT_STATE_CONFLICT",
+            message="工单状态已变化，请刷新后重试。",
+        )
+
+    await app.state.db.write_agent_decision_log(
+        conversation_id=pending.conversation_id,
+        user_id=user.id,
+        request_id=request_id(request),
+        round_no=pending.round_no,
+        decision_type="confirmation_execution",
+        tool_name="create_ticket_draft",
+        arguments=public_tool_payload(pending.arguments),
+        duration_ms=duration_ms,
+        result_summary=(
+            f"员工确认后已创建并提交工单 {submitted['draft_no']}，"
+            f"队列={draft.get('queue') or 'employee_services'}"
+        ),
+    )
+    await app.state.db.write_audit_log(
+        actor_id=user.id,
+        actor_role=user.role,
+        action="agent_ticket_confirmed_submit",
+        resource_type="ticket_draft",
+        resource_id=str(submitted["id"]),
+        request_id=request_id(request),
+        after_data={
+            "confirmation_id": confirmation_id,
+            "draft_no": submitted["draft_no"],
+            "status": submitted["status"],
+            "confirmation_source": submitted.get("confirmation_source"),
+            "original_request_id": pending.request_id,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "code": "OK",
+        "message": "已按你的确认创建并提交薪酬福利咨询工单。",
+        "request_id": request_id(request),
+        "data": {
+            "draft_id": submitted["id"],
+            "draft_no": submitted["draft_no"],
+            "status": submitted["status"],
+            "submitted_at": submitted["submitted_at"],
+            "confirmed_at": submitted["confirmed_at"],
+            "queue": draft.get("queue"),
+            "priority": draft.get("priority"),
+        },
+    }
 
 
 @app.post("/api/tickets/{draft_id}/confirm")

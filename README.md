@@ -14,9 +14,10 @@
 - 动态系统提示词，修改后下一次问答立即生效
 - 疑似违规工单标记与撤销记录
 - Function Calling 自主工具循环：员工上下文、制度检索、政策校验、
-  报销校验、队列路由、草稿、人工复核和工单状态
+  咨询资料校验、队列路由、建单预览、人工复核和工单状态
 - 服务端强制工具依赖和一次性签名凭证，防止模型跳过校验创建工单
-- 工单草稿必须由员工本人显式确认后才能提交，15 分钟后自动失效
+- `create_ticket_draft` 执行前强制中断，员工确认预览后才执行并提交
+- 每轮模型决策写入 `agent_decision_logs`，记录工具、脱敏参数、耗时和结果摘要
 - 统一错误码和中文错误信息
 
 ## 启动
@@ -84,9 +85,9 @@ JWT_EXPIRE_HOURS=8
 TOP_K=3
 CHUNK_SIZE=500
 CHUNK_OVERLAP=80
-AGENT_MAX_STEPS=12
 AGENT_TOKEN_TTL_SECONDS=600
-INVOICE_HUMAN_REVIEW_THRESHOLD=3000
+AGENT_MAX_ROUNDS=5
+AGENT_CONFIRMATION_TTL_SECONDS=600
 ```
 
 ## 主要接口
@@ -95,6 +96,7 @@ INVOICE_HUMAN_REVIEW_THRESHOLD=3000
 - `POST /api/auth/token`：JSON 登录并返回 Bearer Token
 - `GET /api/auth/me`：当前身份
 - `POST /chat`：员工问答与自主工具循环 SSE
+- `POST /api/agent/confirmations/{id}/confirm`：确认建单预览后执行工具
 - `POST /api/tickets/{draft_id}/confirm`：员工本人确认并提交草稿
 - `POST /admin/knowledge/upload`：上传制度
 - `POST /admin/knowledge/{id}/delete`：软删除制度
@@ -106,26 +108,59 @@ INVOICE_HUMAN_REVIEW_THRESHOLD=3000
 
 SSE 常见事件顺序：
 
-`status` → `tool`（可出现多次）→ `draft`（按需）→ `delta` →
-`sources` → `done`
+`status` → `tool`（可出现多次）→ `delta` →
+`confirmation_required`（按需）→ `sources` → `done`
 
-## Agent 工具约束
+## Harness 执行循环
 
-模型可以自主决定下一步工具，但不能绕过以下服务端规则：
+采用轻量、供应商无关的 Agent Harness，实现：
+
+`模型决策 → 工具执行 → 结果回填 → 再决策`
+
+最多 5 轮。模型可以在同一轮规划多个工具，Harness 会按服务端依赖顺序
+串行执行，避免身份、检索和校验工具被并发乱序调用。
+
+模型可以自主决定下一步工具，但不能绕过以下规则：
 
 1. `get_employee_profile` 从登录会话读取员工身份，禁止由模型传入员工 ID。
 2. `search_knowledge` 返回本轮有效的 `evidence_id` 和制度来源。
 3. `validate_policy` 只能使用本轮检索证据，通过后签发短期政策凭证。
-4. 报销事项必须继续通过 `validate_invoice`。
-5. `route_ticket` 消费并核验前置凭证；报销工单缺少发票凭证时直接拒绝。
-6. `create_ticket_draft` 必须持有一次性 `routing_token`；高风险工单只能
-   调用 `request_human_review`。
-7. 草稿创建成功也不等于提交。员工在前端点击“确认并提交”后，后端还会
-   校验所有者、草稿版本、有效期和显式确认字段。
+4. 建单前必须通过 `validate_consultation`，检查咨询主题和具体诉求；
+   资料不足时先向员工追问。
+5. `route_ticket` 同时核验政策与咨询资料凭证，并签发一次性
+   `routing_token`。
+6. Harness 拦截 `create_ticket_draft`：只流式展示标题和说明，不写数据库。
+   员工确认后，独立接口才执行建单并提交。
+7. 高风险、劳动争议、个人例外、社保公积金补缴等事项只能转人工。
 
 工具凭证绑定用户、会话、用途和 `jti`，服务端记录一次性消费。签名凭证
 不会出现在 SSE、浏览器内存或审计日志中。系统提示词负责告知模型规则，
 真正的阻断发生在工具执行器与确认接口。
+
+### 典型轨迹
+
+1. `新人入职薪酬福利是多少`
+   `get_employee_profile + search_knowledge → validate_policy → 最终回答`。
+   只查询制度，不进入工单链路。
+2. `帮我提交我的咨询工单`
+   缺少具体诉求时先追问；补充后可走
+   `validate_policy → validate_consultation → route_ticket →
+   create_ticket_draft（暂停确认）→ 员工确认后建单并提交`。
+3. `怎么能不能提交某方面的工单`
+   属于“能否提交”的制度咨询，只输出结论，不误解为创建工单的执行指令。
+
+## 阶段 5 分析数据
+
+`agent_decision_logs` 按会话、请求和轮次记录：
+
+- `decision_type`
+- `tool_name`
+- 脱敏后的 `arguments_json`
+- `duration_ms`
+- `result_summary`
+
+其中签名 Token 永远不会进入日志，适合后续分析工具选择准确率、平均耗时、
+人工中断率和转化路径。
 
 ## 测试
 
@@ -133,7 +168,8 @@ SSE 常见事件顺序：
 python -m unittest -v tests.test_agent_flow
 ```
 
-测试覆盖报销草稿显式确认、重复提交拦截、高风险转人工和管理员越权提交。
+测试覆盖三种典型轨迹、最多 5 轮限制、确认前零写入、确认后提交、
+逐轮日志、高风险转人工和管理员越权。
 
 ## 文档说明
 

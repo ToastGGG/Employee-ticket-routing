@@ -10,7 +10,7 @@
 
 运行示例：
     python stage1_rag_cli.py --document ./docs/薪酬福利制度.md
-    python stage1_rag_cli.py --document ./docs/报销制度.md --question "差旅报销需要哪些材料？"
+    python stage1_rag_cli.py --document ./docs/薪酬福利制度示例.md --question "新人入职首月薪酬怎么计算？"
 
 可配置环境变量：
     LLM_PROVIDER:
@@ -403,7 +403,7 @@ def tokenize_for_retrieval(text: str) -> list[str]:
     原型的约束是“单脚本、低依赖”，因此不引入 jieba：
     - 英文和数字按连续 token 处理；
     - 中文连续片段同时生成单字与双字 token；
-    - 双字 token 能覆盖“政策版本”“报销材料”等常见检索短语。
+    - 双字 token 能覆盖“政策版本”“社保基数”等常见检索短语。
     """
 
     normalized = text.lower()

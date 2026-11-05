@@ -1,4 +1,4 @@
-"""Agent 工具闭环的端到端回归测试。"""
+"""薪酬福利咨询 Agent Harness 的端到端回归测试。"""
 
 from __future__ import annotations
 
@@ -40,23 +40,21 @@ def parse_sse(raw: str) -> list[tuple[str, dict]]:
 
 
 class AgentFlowTests(unittest.TestCase):
-    """覆盖草稿确认、人工复核、角色权限和跳过校验四个关键边界。"""
+    """覆盖三种典型对话、确认中断、审计日志和越权边界。"""
 
     @classmethod
     def setUpClass(cls) -> None:
-        # 某些 Windows 沙箱会禁止 SQLite 在系统 Temp 下建库，因此把测试
-        # 数据放到仓库内的短生命周期目录，测试结束自动清理。
         test_root = Path(os.getenv("AGENT_TEST_ROOT", str(REPO_ROOT)))
         test_root.mkdir(parents=True, exist_ok=True)
         cls.data_dir = test_root / f".agent-test-{uuid.uuid4().hex}"
         cls.data_dir.mkdir(parents=True)
-        data_dir = cls.data_dir
-        os.environ["DATA_DIR"] = str(data_dir)
-        os.environ["SQLITE_PATH"] = str(data_dir / "test.sqlite3")
-        os.environ["RAG_CACHE_DIR"] = str(data_dir / "faiss_cache")
-        os.environ["UPLOAD_DIR"] = str(data_dir / "uploads")
+        os.environ["DATA_DIR"] = str(cls.data_dir)
+        os.environ["SQLITE_PATH"] = str(cls.data_dir / "test.sqlite3")
+        os.environ["RAG_CACHE_DIR"] = str(cls.data_dir / "faiss_cache")
+        os.environ["UPLOAD_DIR"] = str(cls.data_dir / "uploads")
         os.environ["LLM_PROVIDER"] = "mock"
         os.environ["EMBEDDING_PROVIDER"] = "hash"
+        os.environ["AGENT_MAX_ROUNDS"] = "5"
         cls.client_context = TestClient(app)
         cls.client = cls.client_context.__enter__()
 
@@ -90,77 +88,160 @@ class AgentFlowTests(unittest.TestCase):
             raw = "".join(response.iter_text())
         return parse_sse(raw)
 
-    def test_reimbursement_draft_is_submitted_only_after_confirmation(self) -> None:
+    @staticmethod
+    def done_data(events: list[tuple[str, dict]]) -> dict:
+        return next(data for name, data in events if name == "done")
+
+    @staticmethod
+    def answer_text(events: list[tuple[str, dict]]) -> str:
+        return "".join(
+            str(data.get("text") or "")
+            for name, data in events
+            if name == "delta"
+        )
+
+    async def ticket_count(self, conversation_id: str) -> int:
+        async with app.state.db._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT COUNT(*) FROM ticket_drafts WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            return int((await cursor.fetchone())[0])
+
+    def test_new_hire_policy_question_only_queries_and_answers(self) -> None:
+        """典型轨迹 a：制度查询只解释政策，不进入建单链路。"""
+
+        token = self.login("employee", "Employee@123456")
+        events = self.chat(token, "新人入职薪酬福利是多少")
+        names = [name for name, _ in events]
+        self.assertNotIn("confirmation_required", names)
+        self.assertIn("15", self.answer_text(events))
+        conversation_id = self.done_data(events)["conversation_id"]
+        self.assertEqual(
+            asyncio.run(self.ticket_count(conversation_id)),
+            0,
+        )
+
+        logs = asyncio.run(
+            app.state.db.list_agent_decision_logs(
+                conversation_id=conversation_id
+            )
+        )
+        tools = [row["tool_name"] for row in logs if row["tool_name"]]
+        self.assertIn("search_knowledge", tools)
+        self.assertIn("validate_policy", tools)
+        self.assertNotIn("create_ticket_draft", tools)
+        self.assertLessEqual(max(row["round_no"] for row in logs), 5)
+
+    def test_vague_submit_request_asks_for_requirement(self) -> None:
+        """典型轨迹 b 的前半段：只说建单但缺少诉求时必须先追问。"""
+
+        token = self.login("employee", "Employee@123456")
+        events = self.chat(token, "帮我提交我的咨询工单")
+        self.assertNotIn(
+            "confirmation_required",
+            [name for name, _ in events],
+        )
+        self.assertIn("请补充", self.answer_text(events))
+
+    def test_detailed_submit_is_interrupted_until_employee_confirms(self) -> None:
+        """典型轨迹 b：确认前不执行 create_ticket_draft，确认后创建并提交。"""
+
         token = self.login("employee", "Employee@123456")
         events = self.chat(
             token,
             (
-                "我要提交一笔 800 元差旅报销，附件 file_inv001，"
-                "发生日期 2026-10-20，请帮我建单"
+                "帮我提交我的咨询工单，我是新员工，"
+                "想确认入职首月薪酬和社保公积金基数"
             ),
         )
-        event_names = [name for name, _ in events]
-        self.assertIn("tool", event_names)
-        self.assertIn("draft", event_names)
-        self.assertEqual(event_names[-1], "done")
-
-        draft = next(data for name, data in events if name == "draft")
-        self.assertEqual(draft["status"], "draft")
-        self.assertGreaterEqual(draft["draft_version"], 1)
-
-        no_consent = self.client.post(
-            f"/api/tickets/{draft['draft_id']}/confirm",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"confirmed": False, "draft_version": draft["draft_version"]},
+        self.assertIn(
+            "confirmation_required",
+            [name for name, _ in events],
         )
-        self.assertEqual(no_consent.status_code, 422)
+        proposal = next(
+            data for name, data in events if name == "confirmation_required"
+        )
+        done = self.done_data(events)
+        self.assertEqual(done["status"], "waiting_confirmation")
         self.assertEqual(
-            no_consent.json()["code"],
-            "EXPLICIT_CONFIRMATION_REQUIRED",
+            asyncio.run(self.ticket_count(done["conversation_id"])),
+            0,
         )
+
+        rejected = self.client.post(
+            f"/api/agent/confirmations/{proposal['confirmation_id']}/confirm",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"confirmed": False},
+        )
+        self.assertEqual(rejected.status_code, 422)
 
         confirmed = self.client.post(
-            f"/api/tickets/{draft['draft_id']}/confirm",
+            f"/api/agent/confirmations/{proposal['confirmation_id']}/confirm",
             headers={"Authorization": f"Bearer {token}"},
-            json={"confirmed": True, "draft_version": draft["draft_version"]},
+            json={"confirmed": True},
         )
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         self.assertEqual(confirmed.json()["data"]["status"], "submitted")
 
         stored = asyncio.run(
             app.state.db.get_ticket_status(
-                ticket_id=draft["draft_id"],
+                ticket_id=confirmed.json()["data"]["draft_id"],
                 user_id="employee-demo",
             )
         )
-        self.assertIsNotNone(stored)
         self.assertEqual(stored["status"], "submitted")
 
-        repeated = self.client.post(
-            f"/api/tickets/{draft['draft_id']}/confirm",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"confirmed": True, "draft_version": draft["draft_version"]},
+        logs = asyncio.run(
+            app.state.db.list_agent_decision_logs(
+                conversation_id=done["conversation_id"]
+            )
         )
-        self.assertEqual(repeated.status_code, 409)
+        decisions = [row["decision_type"] for row in logs]
+        self.assertIn("confirmation_required", decisions)
+        self.assertIn("confirmation_execution", decisions)
+        self.assertLessEqual(max(row["round_no"] for row in logs), 5)
+        tool_logs = [row for row in logs if row["tool_name"]]
+        self.assertTrue(tool_logs)
+        for row in tool_logs:
+            self.assertIsNotNone(row["arguments_json"])
+            self.assertGreaterEqual(row["duration_ms"], 0)
+            self.assertTrue(row["result_summary"])
+            self.assertNotIn("_token", row["arguments_json"])
 
-    def test_high_value_reimbursement_routes_to_human_review(self) -> None:
+        repeated = self.client.post(
+            f"/api/agent/confirmations/{proposal['confirmation_id']}/confirm",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"confirmed": True},
+        )
+        self.assertEqual(repeated.status_code, 404)
+
+    def test_can_i_submit_question_returns_conclusion_without_ticket(self) -> None:
+        """典型轨迹 c：询问“能否提交”只输出结论，不误解为执行指令。"""
+
+        token = self.login("employee", "Employee@123456")
+        events = self.chat(token, "怎么能不能提交某方面的工单")
+        self.assertNotIn(
+            "confirmation_required",
+            [name for name, _ in events],
+        )
+        self.assertTrue(self.answer_text(events).strip())
+
+    def test_high_risk_consultation_routes_to_human_review(self) -> None:
+        """劳动争议类事项不能走普通建单确认流程。"""
+
         token = self.login("employee", "Employee@123456")
         events = self.chat(
             token,
-            (
-                "我要提交一笔 5000 元差旅报销，附件 file_inv999，"
-                "发生日期 2026-10-20，请帮我建单"
-            ),
+            "帮我提交我的咨询工单，我想就绩效奖金争议提出申诉",
         )
-        self.assertNotIn("draft", [name for name, _ in events])
-        answer = "".join(
-            data.get("text", "")
-            for name, data in events
-            if name == "delta"
+        self.assertNotIn(
+            "confirmation_required",
+            [name for name, _ in events],
         )
-        self.assertIn("人工", answer)
+        self.assertIn("人工", self.answer_text(events))
 
-        async def find_handoff() -> dict | None:
+        async def latest_handoff() -> dict | None:
             async with app.state.db._connect() as connection:
                 cursor = await connection.execute(
                     """
@@ -174,41 +255,36 @@ class AgentFlowTests(unittest.TestCase):
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
-        handoff = asyncio.run(find_handoff())
+        handoff = asyncio.run(latest_handoff())
         self.assertIsNotNone(handoff)
         self.assertEqual(handoff["priority"], "high")
 
-    def test_admin_cannot_confirm_employee_draft(self) -> None:
+    def test_admin_cannot_confirm_employee_proposal(self) -> None:
         employee_token = self.login("employee", "Employee@123456")
         events = self.chat(
             employee_token,
-            (
-                "我要提交一笔 600 元差旅报销，附件 file_inv777，"
-                "发生日期 2026-10-20，请帮我建单"
-            ),
+            "帮我提交我的咨询工单，想咨询补充商业保险覆盖家属范围",
         )
-        draft = next(data for name, data in events if name == "draft")
-
+        proposal = next(
+            data for name, data in events if name == "confirmation_required"
+        )
         admin_token = self.login("admin", "Admin@123456")
         response = self.client.post(
-            f"/api/tickets/{draft['draft_id']}/confirm",
+            f"/api/agent/confirmations/{proposal['confirmation_id']}/confirm",
             headers={"Authorization": f"Bearer {admin_token}"},
-            json={"confirmed": True, "draft_version": draft["draft_version"]},
+            json={"confirmed": True},
         )
         self.assertEqual(response.status_code, 403)
 
-    def test_reimbursement_cannot_bypass_invoice_validation(self) -> None:
-        """即使有人伪造出合法的 routing 结构，缺少发票校验也必须被拒绝。"""
+    def test_create_draft_rejects_forged_routing_without_consultation(self) -> None:
+        """即使伪造签名正确的 routing 结构，缺少咨询校验也必须拒绝。"""
 
-        async def run_check() -> tuple[dict, dict, dict]:
+        async def run_check() -> tuple[dict, dict]:
             executor = AgentToolExecutor(
                 database=app.state.db,
                 runtime=app.state.runtime,
                 token_service=app.state.agent_tokens,
-                user={
-                    "id": "employee-demo",
-                    "role": "employee",
-                },
+                user={"id": "employee-demo", "role": "employee"},
                 conversation_id="security-boundary-case",
             )
             forged_routing = app.state.agent_tokens.create(
@@ -216,79 +292,52 @@ class AgentFlowTests(unittest.TestCase):
                 user_id="employee-demo",
                 case_id="security-boundary-case",
                 payload={
-                    "case_type": "reimbursement",
+                    "case_type": "compensation",
                     "policy_jti": "policy",
-                    "invoice_jti": None,
-                    "queue": "finance_review",
+                    "consultation_jti": None,
+                    "queue": "compensation_benefits",
                     "priority": "normal",
                 },
             )
-            draft_result = await executor.execute(
+            create_result = await executor.execute(
                 call_id="forged-create",
                 name="create_ticket_draft",
                 arguments={
                     "routing_token": forged_routing,
-                    "title": "越权草稿",
-                    "description": "试图跳过发票校验",
+                    "title": "越权工单",
+                    "description": "试图跳过咨询资料校验",
                     "attachment_ids": [],
                 },
             )
-            route_result = await executor.execute(
-                call_id="direct-route",
-                name="route_ticket",
-                arguments={
-                    "case_type": "reimbursement",
-                    "policy_validation_token": forged_routing,
-                    "invoice_validation_token": None,
-                    "risk_flags": [],
-                },
-            )
-            mismatch_executor = AgentToolExecutor(
-                database=app.state.db,
-                runtime=app.state.runtime,
-                token_service=app.state.agent_tokens,
-                user={
-                    "id": "employee-demo",
-                    "role": "employee",
-                },
-                conversation_id="security-boundary-case",
-                request_question="我要提交差旅报销发票",
-            )
-            valid_policy_token = app.state.agent_tokens.create(
+            policy_token = app.state.agent_tokens.create(
                 token_type="policy",
                 user_id="employee-demo",
                 case_id="security-boundary-case",
                 payload={"evidence_ids": [1]},
             )
-            mismatch_result = await mismatch_executor.execute(
-                call_id="mislabel-case",
+            route_result = await executor.execute(
+                call_id="direct-route",
                 name="route_ticket",
                 arguments={
-                    "case_type": "salary_benefit",
-                    "policy_validation_token": valid_policy_token,
-                    "invoice_validation_token": None,
+                    "case_type": "compensation",
+                    "policy_validation_token": policy_token,
+                    "consultation_validation_token": "",
                     "risk_flags": [],
                 },
             )
-            return (
-                draft_result.model_payload,
-                route_result.model_payload,
-                mismatch_result.model_payload,
-            )
+            return create_result.model_payload, route_result.model_payload
 
-        draft_payload, route_payload, mismatch_payload = asyncio.run(run_check())
-        self.assertFalse(draft_payload["ok"])
+        create_payload, route_payload = asyncio.run(run_check())
+        self.assertFalse(create_payload["ok"])
         self.assertEqual(
-            draft_payload["code"],
-            "INVOICE_VALIDATION_REQUIRED",
+            create_payload["code"],
+            "CONSULTATION_VALIDATION_REQUIRED",
         )
         self.assertFalse(route_payload["ok"])
-        self.assertIn(
+        self.assertEqual(
             route_payload["code"],
-            {"POLICY_VALIDATION_REQUIRED", "INVOICE_VALIDATION_REQUIRED"},
+            "CONSULTATION_VALIDATION_REQUIRED",
         )
-        self.assertFalse(mismatch_payload["ok"])
-        self.assertEqual(mismatch_payload["code"], "CASE_TYPE_MISMATCH")
 
 
 if __name__ == "__main__":
