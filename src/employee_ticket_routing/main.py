@@ -33,7 +33,13 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -55,6 +61,7 @@ try:
         seed_default_document,
         validate_upload,
     )
+    from .core.observability import SERVICE_METRICS, normalize_request_route
     from .core.rag_runtime import RagRuntime
     from .core.security import (
         ACCESS_COOKIE_NAME,
@@ -82,6 +89,10 @@ except ImportError:
         run_ingestion_job,
         seed_default_document,
         validate_upload,
+    )
+    from employee_ticket_routing.core.observability import (
+        SERVICE_METRICS,
+        normalize_request_route,
     )
     from employee_ticket_routing.core.rag_runtime import RagRuntime
     from employee_ticket_routing.core.security import (
@@ -335,9 +346,25 @@ async def attach_request_id(request: Request, call_next):
     """为每个请求分配并返回 Trace ID。"""
 
     request.state.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request.state.request_id
-    return response
+    started_at = timer.perf_counter()
+    SERVICE_METRICS.start_request()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+    finally:
+        route_object = request.scope.get("route")
+        route_path = getattr(route_object, "path", None) or normalize_request_route(
+            request.url.path
+        )
+        SERVICE_METRICS.finish_request(
+            method=request.method,
+            route=route_path,
+            status_code=status_code,
+            duration_ms=(timer.perf_counter() - started_at) * 1000,
+        )
 
 
 @app.exception_handler(APIError)
@@ -774,6 +801,30 @@ async def health(request: Request):
             "llm_fallback_reason": runtime.settings.llm_fallback_reason,
         },
     }
+
+
+@app.get("/api/admin/metrics")
+async def admin_metrics(
+    request: Request,
+    user: CurrentUser = Depends(require_admin),
+):
+    """管理员查看进程内关键指标快照。"""
+
+    return {
+        "code": "OK",
+        "message": "指标快照读取成功。",
+        "request_id": request_id(request),
+        "data": SERVICE_METRICS.snapshot(),
+    }
+
+
+@app.get("/api/admin/metrics/prometheus", response_class=PlainTextResponse)
+async def admin_metrics_prometheus(
+    user: CurrentUser = Depends(require_admin),
+) -> str:
+    """管理员读取 Prometheus 文本指标。"""
+
+    return SERVICE_METRICS.render_prometheus()
 
 
 def sse_event(event: str, data: dict) -> str:

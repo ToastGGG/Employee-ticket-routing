@@ -426,6 +426,32 @@ class AgentFlowTests(unittest.TestCase):
             "CONSULTATION_VALIDATION_REQUIRED",
         )
 
+    def test_admin_metrics_endpoint_exposes_snapshot_and_blocks_employee(self) -> None:
+        employee_token = self.login("employee", "Employee@123456")
+        forbidden = self.client.get(
+            "/api/admin/metrics",
+            headers={"Authorization": f"Bearer {employee_token}"},
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        admin_token = self.login("admin", "Admin@123456")
+        response = self.client.get(
+            "/api/admin/metrics",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()["data"]
+        self.assertGreaterEqual(data["uptime_seconds"], 0)
+        self.assertIn("counters", data)
+        self.assertIn("latencies", data)
+
+        prometheus = self.client.get(
+            "/api/admin/metrics/prometheus",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        self.assertEqual(prometheus.status_code, 200)
+        self.assertIn("employee_http_requests_total", prometheus.text)
+
 
 if __name__ == "__main__":
     unittest.main()
