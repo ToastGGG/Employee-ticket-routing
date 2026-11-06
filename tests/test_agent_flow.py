@@ -162,6 +162,11 @@ class AgentFlowTests(unittest.TestCase):
         proposal = next(
             data for name, data in events if name == "confirmation_required"
         )
+        self.assertGreaterEqual(len(proposal["queue_candidates"]), 1)
+        self.assertGreater(proposal["confidence"], 0)
+        self.assertTrue(proposal["receiver_role"])
+        self.assertTrue(proposal["deadline"])
+        self.assertTrue(proposal["unresolved_items"])
         done = self.done_data(events)
         self.assertEqual(done["status"], "waiting_confirmation")
         self.assertEqual(
@@ -215,6 +220,88 @@ class AgentFlowTests(unittest.TestCase):
             json={"confirmed": True},
         )
         self.assertEqual(repeated.status_code, 404)
+
+    def test_policy_retrieval_filters_expired_and_wrong_scope(self) -> None:
+        """过期制度或其他地区制度不得进入当前员工的有效证据集。"""
+
+        async def prepare_and_retrieve() -> tuple[list, list]:
+            async def add_policy(
+                document_id: str,
+                file_name: str,
+                region: str,
+                effective_to: str,
+                confirmation_status: str = "confirmed",
+            ) -> None:
+                await app.state.db.create_knowledge_document(
+                    document_id=document_id,
+                    file_name=file_name,
+                    title=file_name,
+                    version="1.0",
+                    file_hash=f"hash-{document_id}",
+                    storage_path=f"/tmp/{file_name}",
+                    file_size=100,
+                    mime_type="text/markdown",
+                    created_by="admin-demo",
+                    effective_to=effective_to,
+                    region=region,
+                    employee_type="employee",
+                    policy_group="default",
+                    confirmation_status=confirmation_status,
+                    source_owner="测试负责人",
+                )
+                await app.state.db.replace_document_chunks(
+                    document_id=document_id,
+                    chunks=[
+                        {
+                            "chunk_index": 0,
+                            "content": "测试育儿补贴每月1000元。",
+                            "char_start": 0,
+                            "char_end": 14,
+                        }
+                    ],
+                )
+                await app.state.db.update_document_status(
+                    document_id=document_id,
+                    status="ready",
+                )
+
+            await add_policy(
+                "expired-policy",
+                "过期育儿补贴.md",
+                "CN",
+                "2020-01-01",
+            )
+            await add_policy(
+                "foreign-policy",
+                "海外育儿补贴.md",
+                "US",
+                "2099-12-31",
+            )
+            await add_policy(
+                "unconfirmed-policy",
+                "待确认育儿补贴.md",
+                "CN",
+                "2099-12-31",
+                "draft",
+            )
+            await app.state.runtime.reload_from_database(app.state.db)
+            hits, citations = await app.state.runtime.retrieve(
+                "育儿补贴",
+                app.state.db,
+                scope={
+                    "region": "CN",
+                    "employment_type": "employee",
+                    "policy_group": "default",
+                },
+            )
+            return hits, citations
+
+        hits, citations = asyncio.run(prepare_and_retrieve())
+        returned_files = {citation.file_name for citation in citations}
+        self.assertNotIn("过期育儿补贴.md", returned_files)
+        self.assertNotIn("海外育儿补贴.md", returned_files)
+        self.assertNotIn("待确认育儿补贴.md", returned_files)
+        self.assertEqual(len(hits), len(citations))
 
     def test_can_i_submit_question_returns_conclusion_without_ticket(self) -> None:
         """典型轨迹 c：询问“能否提交”只输出结论，不误解为执行指令。"""

@@ -123,6 +123,11 @@ class SQLiteDatabase:
                     chunk_count INTEGER NOT NULL DEFAULT 0,
                     effective_from TEXT,
                     effective_to TEXT,
+                    region TEXT NOT NULL DEFAULT 'CN',
+                    employee_type TEXT NOT NULL DEFAULT 'employee',
+                    policy_group TEXT NOT NULL DEFAULT 'default',
+                    confirmation_status TEXT NOT NULL DEFAULT 'confirmed',
+                    source_owner TEXT,
                     created_by TEXT,
                     deleted_by TEXT,
                     deleted_at TEXT,
@@ -301,6 +306,39 @@ class SQLiteDatabase:
                 "knowledge_documents",
                 "chunk_count",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            await self._ensure_column(
+                connection, "knowledge_documents", "effective_from", "TEXT"
+            )
+            await self._ensure_column(
+                connection, "knowledge_documents", "effective_to", "TEXT"
+            )
+            await self._ensure_column(
+                connection,
+                "knowledge_documents",
+                "region",
+                "TEXT NOT NULL DEFAULT 'CN'",
+            )
+            await self._ensure_column(
+                connection,
+                "knowledge_documents",
+                "employee_type",
+                "TEXT NOT NULL DEFAULT 'employee'",
+            )
+            await self._ensure_column(
+                connection,
+                "knowledge_documents",
+                "policy_group",
+                "TEXT NOT NULL DEFAULT 'default'",
+            )
+            await self._ensure_column(
+                connection,
+                "knowledge_documents",
+                "confirmation_status",
+                "TEXT NOT NULL DEFAULT 'confirmed'",
+            )
+            await self._ensure_column(
+                connection, "knowledge_documents", "source_owner", "TEXT"
             )
             await self._ensure_column(
                 connection, "knowledge_documents", "created_by", "TEXT"
@@ -923,13 +961,18 @@ class SQLiteDatabase:
                 await connection.execute(
                     """
                     INSERT INTO knowledge_documents
-                        (id, file_name, title, version, status, created_at)
-                    VALUES (?, ?, ?, ?, 'active', ?)
+                        (
+                            id, file_name, title, version, status, region,
+                            employee_type, policy_group, confirmation_status,
+                            created_at
+                        )
+                    VALUES (?, ?, ?, ?, 'ready', 'CN', 'employee', 'default',
+                            'confirmed', ?)
                     ON CONFLICT(id) DO UPDATE SET
                         file_name = excluded.file_name,
                         title = excluded.title,
                         version = excluded.version,
-                        status = 'active'
+                        status = 'ready'
                     """,
                     (document_id, file_name, title, version, now),
                 )
@@ -995,7 +1038,14 @@ class SQLiteDatabase:
                     kd.id AS document_id,
                     kd.file_name,
                     kd.title,
-                    kd.version
+                    kd.version,
+                    kd.effective_from,
+                    kd.effective_to,
+                    kd.region,
+                    kd.employee_type,
+                    kd.policy_group,
+                    kd.confirmation_status,
+                    kd.source_owner
                 FROM document_chunks dc
                 JOIN knowledge_documents kd ON kd.id = dc.document_id
                 WHERE dc.document_id = ?
@@ -1019,6 +1069,13 @@ class SQLiteDatabase:
         mime_type: str,
         created_by: str,
         status: str = "processing",
+        effective_from: str | None = None,
+        effective_to: str | None = None,
+        region: str = "CN",
+        employee_type: str = "employee",
+        policy_group: str = "default",
+        confirmation_status: str = "confirmed",
+        source_owner: str | None = None,
     ) -> None:
         """创建待入库文档记录；文件哈希由唯一索引防止重复上传。"""
 
@@ -1030,9 +1087,14 @@ class SQLiteDatabase:
                     (
                         id, file_name, title, version, status, original_filename,
                         storage_path, file_hash, file_size, mime_type,
-                        chunk_count, created_by, created_at
+                        chunk_count, effective_from, effective_to, region,
+                        employee_type, policy_group, confirmation_status,
+                        source_owner, created_by, created_at
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?
+                )
                 """,
                 (
                     document_id,
@@ -1045,6 +1107,13 @@ class SQLiteDatabase:
                     file_hash,
                     file_size,
                     mime_type,
+                    effective_from,
+                    effective_to,
+                    region,
+                    employee_type,
+                    policy_group,
+                    confirmation_status,
+                    source_owner,
                     created_by,
                     now,
                 ),
@@ -1237,7 +1306,14 @@ class SQLiteDatabase:
                     kd.id AS document_id,
                     kd.file_name,
                     kd.title,
-                    kd.version
+                    kd.version,
+                    kd.effective_from,
+                    kd.effective_to,
+                    kd.region,
+                    kd.employee_type,
+                    kd.policy_group,
+                    kd.confirmation_status,
+                    kd.source_owner
                 FROM document_chunks dc
                 JOIN knowledge_documents kd ON kd.id = dc.document_id
                 WHERE kd.status = 'ready'
@@ -1270,7 +1346,14 @@ class SQLiteDatabase:
                     kd.id AS document_id,
                     kd.file_name,
                     kd.title,
-                    kd.version
+                    kd.version,
+                    kd.effective_from,
+                    kd.effective_to,
+                    kd.region,
+                    kd.employee_type,
+                    kd.policy_group,
+                    kd.confirmation_status,
+                    kd.source_owner
                 FROM document_chunks dc
                 JOIN knowledge_documents kd ON kd.id = dc.document_id
                 WHERE dc.vector_id IN ({placeholders})
@@ -1639,11 +1722,39 @@ class SQLiteDatabase:
                 "processing": "SELECT COUNT(*) FROM ingestion_jobs WHERE status NOT IN ('ready', 'failed')",
                 "conversations": "SELECT COUNT(*) FROM conversations",
                 "flags": "SELECT COUNT(*) FROM audit_flags WHERE status = 'active'",
+                "submitted_tickets": "SELECT COUNT(*) FROM ticket_drafts WHERE status = 'submitted'",
+                "human_reviews": "SELECT COUNT(*) FROM ticket_drafts WHERE category = 'human_review'",
+                "agent_decisions": "SELECT COUNT(*) FROM agent_decision_logs",
+                "agent_tool_calls": "SELECT COUNT(*) FROM agent_decision_logs WHERE decision_type = 'tool_call'",
+                "agent_errors": (
+                    "SELECT COUNT(*) FROM agent_decision_logs "
+                    "WHERE decision_type IN ('confirmation_precheck_failed', "
+                    "'confirmation_execution_failed')"
+                ),
+                "policy_conflicts_or_unconfirmed": (
+                    "SELECT COUNT(*) FROM knowledge_documents "
+                    "WHERE status = 'ready' AND confirmation_status != 'confirmed'"
+                ),
+                "expired_policies": (
+                    "SELECT COUNT(*) FROM knowledge_documents "
+                    "WHERE status = 'ready' AND effective_to IS NOT NULL "
+                    "AND effective_to < date('now')"
+                ),
             }
             result: dict[str, int] = {}
             for key, sql in queries.items():
                 cursor = await connection.execute(sql)
                 result[key] = int((await cursor.fetchone())[0])
+            duration_cursor = await connection.execute(
+                """
+                SELECT COALESCE(ROUND(AVG(duration_ms)), 0)
+                FROM agent_decision_logs
+                WHERE decision_type = 'tool_call'
+                """
+            )
+            result["avg_tool_duration_ms"] = int(
+                (await duration_cursor.fetchone())[0]
+            )
         return result
 
     async def list_audit_conversations(

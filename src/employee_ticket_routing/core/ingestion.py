@@ -189,6 +189,13 @@ async def create_document_job(
     created_by: str,
     title: str | None = None,
     version: str = "1.0",
+    effective_from: str | None = None,
+    effective_to: str | None = None,
+    region: str = "CN",
+    employee_type: str = "employee",
+    policy_group: str = "default",
+    confirmation_status: str = "confirmed",
+    source_owner: str | None = None,
 ) -> tuple[str, str]:
     """
     创建文档和入库任务记录，返回 (document_id, job_id)。
@@ -213,6 +220,13 @@ async def create_document_job(
         mime_type=mime_type,
         created_by=created_by,
         status="processing",
+        effective_from=effective_from,
+        effective_to=effective_to,
+        region=region,
+        employee_type=employee_type,
+        policy_group=policy_group,
+        confirmation_status=confirmation_status,
+        source_owner=source_owner,
     )
     job_id = await database.create_ingestion_job(
         document_id=document_id,

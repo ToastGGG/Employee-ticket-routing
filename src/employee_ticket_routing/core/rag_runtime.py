@@ -12,6 +12,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import AsyncIterator, Protocol, Sequence
 
@@ -36,6 +37,13 @@ class Citation:
     chunk_index: int
     excerpt: str
     score: float
+    effective_from: str | None
+    effective_to: str | None
+    region: str
+    employee_type: str
+    policy_group: str
+    confirmation_status: str
+    source_owner: str | None
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +54,13 @@ class Citation:
             "chunk_index": self.chunk_index,
             "excerpt": self.excerpt,
             "score": round(self.score, 6),
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+            "region": self.region,
+            "employee_type": self.employee_type,
+            "policy_group": self.policy_group,
+            "confirmation_status": self.confirmation_status,
+            "source_owner": self.source_owner,
         }
 
 
@@ -227,6 +242,63 @@ class RagRuntime:
         self.chunk_count = 0
         self._reload_lock = asyncio.Lock()
 
+    @staticmethod
+    def _scope_value_matches(
+        policy_value: object,
+        employee_value: object,
+    ) -> bool:
+        """空值或通配符表示不限制；否则进行不区分大小写的精确匹配。"""
+
+        normalized = str(policy_value or "*").strip().lower()
+        if normalized in {"", "*", "all"}:
+            return True
+        return normalized == str(employee_value or "").strip().lower()
+
+    @classmethod
+    def _row_is_eligible(
+        cls,
+        row: dict,
+        scope: dict[str, str] | None,
+        *,
+        today: date | None = None,
+    ) -> bool:
+        """
+        检查制度是否当前有效且适用于员工上下文。
+
+        有效期、确认状态、地区、员工类型和政策组任一冲突都不得进入回答依据。
+        """
+
+        current_date = today or date.today()
+        confirmation = str(row.get("confirmation_status") or "confirmed").lower()
+        if confirmation not in {"confirmed", "approved", "active"}:
+            return False
+
+        for field in ("effective_from", "effective_to"):
+            raw_value = row.get(field)
+            if not raw_value:
+                continue
+            try:
+                parsed = date.fromisoformat(str(raw_value)[:10])
+            except ValueError:
+                return False
+            if field == "effective_from" and current_date < parsed:
+                return False
+            if field == "effective_to" and current_date > parsed:
+                return False
+
+        effective_scope = scope or {}
+        return (
+            cls._scope_value_matches(row.get("region"), effective_scope.get("region"))
+            and cls._scope_value_matches(
+                row.get("employee_type"),
+                effective_scope.get("employment_type"),
+            )
+            and cls._scope_value_matches(
+                row.get("policy_group"),
+                effective_scope.get("policy_group"),
+            )
+        )
+
     async def reload_from_database(self, database: SQLiteDatabase) -> None:
         """
         读取所有 ready 文档切片并重建混合索引。
@@ -272,15 +344,21 @@ class RagRuntime:
         self,
         question: str,
         database: SQLiteDatabase,
+        scope: dict[str, str] | None = None,
     ) -> tuple[list[rag.SearchHit], list[Citation]]:
-        """执行 Top-K 混合检索并映射出跨文档来源。"""
+        """
+        执行 Top-K 混合检索，并在映射来源时过滤失效或不适用于员工的制度。
+
+        先扩大候选集，再按有效期、确认状态和员工适用范围过滤，避免前几条
+        命中均是旧政策时直接返回空结果。
+        """
 
         if not self.ready or self.index is None:
             raise RuntimeError(self.error_message or "知识库尚未准备完成")
         hits = await asyncio.to_thread(
             self.index.search,
             question,
-            top_k=self.settings.top_k,
+            top_k=max(self.settings.top_k * 5, 15),
         )
         if not hits:
             return [], []
@@ -289,10 +367,14 @@ class RagRuntime:
             vector_ids=[hit.chunk.chunk_id for hit in hits]
         )
         citations: list[Citation] = []
+        eligible_hits: list[rag.SearchHit] = []
         for hit in hits:
             row = source_rows.get(hit.chunk.chunk_id)
             if row is None:
                 continue
+            if not self._row_is_eligible(row, scope):
+                continue
+            eligible_hits.append(hit)
             citations.append(
                 Citation(
                     document_id=str(row["document_id"]),
@@ -302,9 +384,20 @@ class RagRuntime:
                     chunk_index=int(row["chunk_index"]),
                     excerpt=clean_document_excerpt(str(row["content"]), 300),
                     score=hit.hybrid_score,
+                    effective_from=row.get("effective_from"),
+                    effective_to=row.get("effective_to"),
+                    region=str(row.get("region") or "*"),
+                    employee_type=str(row.get("employee_type") or "*"),
+                    policy_group=str(row.get("policy_group") or "*"),
+                    confirmation_status=str(
+                        row.get("confirmation_status") or "confirmed"
+                    ),
+                    source_owner=row.get("source_owner"),
                 )
             )
-        return hits, citations
+            if len(eligible_hits) >= self.settings.top_k:
+                break
+        return eligible_hits, citations
 
     def build_messages(
         self,

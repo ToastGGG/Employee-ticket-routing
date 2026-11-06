@@ -30,6 +30,26 @@
       <strong>{{ counts.flags }}</strong>
       <small>需继续跟进的工单</small>
     </article>
+    <article class="metric-card">
+      <span>已提交工单</span>
+      <strong>{{ counts.submitted_tickets }}</strong>
+      <small>员工确认后正式提交</small>
+    </article>
+    <article class="metric-card">
+      <span>人工复核</span>
+      <strong>{{ counts.human_reviews }}</strong>
+      <small>高风险或例外事项</small>
+    </article>
+    <article class="metric-card">
+      <span>Agent 工具调用</span>
+      <strong>{{ counts.agent_tool_calls }}</strong>
+      <small>平均 {{ counts.avg_tool_duration_ms }} ms</small>
+    </article>
+    <article class="metric-card">
+      <span>Agent 异常决策</span>
+      <strong>{{ counts.agent_errors }}</strong>
+      <small>预检查或确认执行失败</small>
+    </article>
   </section>
 
   <section class="content-card two-column">
@@ -39,6 +59,10 @@
       {% if runtime.ready %}
         <p><span class="status-dot ok"></span>检索服务正常</p>
         <p class="muted">文档 {{ runtime.document_count }} 份，切片 {{ runtime.chunk_count }} 个。</p>
+        <p class="muted">
+          已过期制度 {{ counts.expired_policies }} 份；
+          待确认或被替代制度 {{ counts.policy_conflicts_or_unconfirmed }} 份。
+        </p>
       {% else %}
         <p><span class="status-dot bad"></span>检索服务未就绪</p>
         <p class="muted">{{ runtime.error_message or '请先上传制度文件。' }}</p>
@@ -48,9 +72,10 @@
       <span class="eyebrow">NEXT ACTION</span>
       <h2>管理建议</h2>
       <ol class="plain-list">
-        <li>检查制度文件的处理状态。</li>
-        <li>审核当前系统提示词版本。</li>
-        <li>抽查员工会话与疑似违规工单。</li>
+        <li>优先核对过期、待确认或被替代的制度版本。</li>
+        <li>抽查 Top-2 路由候选与人工覆盖原因。</li>
+        <li>复核未结项、截止时间和接收角色是否完整。</li>
+        <li>检查 Agent 异常决策和失败工具调用。</li>
       </ol>
     </article>
   </section>

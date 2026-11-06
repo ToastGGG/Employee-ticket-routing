@@ -1306,11 +1306,41 @@ async def admin_upload_knowledge(
     csrf_token: Annotated[str, Form()],
     title: Annotated[str, Form()] = "",
     version: Annotated[str, Form()] = "1.0",
+    effective_from: Annotated[str, Form()] = "",
+    effective_to: Annotated[str, Form()] = "",
+    region: Annotated[str, Form()] = "CN",
+    employee_type: Annotated[str, Form()] = "employee",
+    policy_group: Annotated[str, Form()] = "default",
+    confirmation_status: Annotated[str, Form()] = "confirmed",
+    source_owner: Annotated[str, Form()] = "",
     user: CurrentUser = Depends(require_admin),
 ):
     """上传制度文件并启动后台解析、切片和索引重建。"""
 
     verify_csrf(request, csrf_token)
+    normalized_from = effective_from.strip() or None
+    normalized_to = effective_to.strip() or None
+    try:
+        from_date = date.fromisoformat(normalized_from) if normalized_from else None
+        to_date = date.fromisoformat(normalized_to) if normalized_to else None
+    except ValueError as exc:
+        raise APIError(
+            status_code=422,
+            code="INVALID_POLICY_EFFECTIVE_DATE",
+            message="制度生效日期必须使用 YYYY-MM-DD 格式。",
+        ) from exc
+    if from_date and to_date and from_date > to_date:
+        raise APIError(
+            status_code=422,
+            code="INVALID_POLICY_EFFECTIVE_RANGE",
+            message="制度失效日期不能早于生效日期。",
+        )
+    if confirmation_status not in {"confirmed", "draft", "superseded"}:
+        raise APIError(
+            status_code=422,
+            code="INVALID_POLICY_CONFIRMATION_STATUS",
+            message="制度确认状态不正确。",
+        )
     raw = await file.read(MAX_FILE_SIZE + 1)
     try:
         normalized_name, mime_type = validate_upload(file.filename or "", raw)
@@ -1346,6 +1376,13 @@ async def admin_upload_knowledge(
             created_by=user.id,
             title=title.strip() or None,
             version=version.strip() or "1.0",
+            effective_from=normalized_from,
+            effective_to=normalized_to,
+            region=region.strip().upper() or "CN",
+            employee_type=employee_type.strip() or "employee",
+            policy_group=policy_group.strip() or "default",
+            confirmation_status=confirmation_status,
+            source_owner=source_owner.strip() or user.name,
         )
     except Exception:
         storage_path.unlink(missing_ok=True)
@@ -1358,7 +1395,17 @@ async def admin_upload_knowledge(
         resource_type="knowledge_document",
         resource_id=document_id,
         request_id=request_id(request),
-        after_data={"file_name": normalized_name, "job_id": job_id},
+        after_data={
+            "file_name": normalized_name,
+            "job_id": job_id,
+            "effective_from": normalized_from,
+            "effective_to": normalized_to,
+            "region": region.strip().upper() or "CN",
+            "employee_type": employee_type.strip() or "employee",
+            "policy_group": policy_group.strip() or "default",
+            "confirmation_status": confirmation_status,
+            "source_owner": source_owner.strip() or user.name,
+        },
         ip_address=request.client.host if request.client else None,
     )
     background_tasks.add_task(

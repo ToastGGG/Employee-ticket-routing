@@ -637,7 +637,10 @@
         card.className = "source-card";
         const name = document.createElement("div");
         name.className = "source-name";
-        name.textContent = `${index + 1}. ${source.file_name}（${source.document_version}）`;
+        const effectiveRange = source.effective_from || source.effective_to
+          ? ` · 有效期 ${source.effective_from || "不限"} 至 ${source.effective_to || "长期"}`
+          : "";
+        name.textContent = `${index + 1}. ${source.file_name}（${source.document_version}）${effectiveRange}`;
         const excerpt = document.createElement("div");
         excerpt.className = "source-excerpt";
         excerpt.textContent = source.excerpt;
@@ -667,11 +670,38 @@
       meta.className = "draft-meta";
       const queueText = proposal.queue ? `队列：${proposal.queue}` : "队列：待分配";
       const priorityText = proposal.priority ? `优先级：${proposal.priority}` : "优先级：普通";
-      meta.textContent = `${queueText} · ${priorityText} · 工具尚未执行`;
+      const confidenceText = Number.isFinite(proposal.confidence)
+        ? `候选置信度：${Math.round(proposal.confidence * 100)}%`
+        : "候选置信度：待确认";
+      meta.textContent = `${queueText} · ${priorityText} · ${confidenceText} · 工具尚未执行`;
 
       const description = document.createElement("div");
       description.className = "draft-description";
       description.textContent = proposal.description || proposal.title || "";
+
+      const handoff = document.createElement("div");
+      handoff.className = "draft-meta";
+      const candidates = Array.isArray(proposal.queue_candidates)
+        ? proposal.queue_candidates
+            .map((item) => `${item.queue}(${Math.round(item.confidence * 100)}%)`)
+            .join(" → ")
+        : "";
+      const unresolved = Array.isArray(proposal.unresolved_items)
+        ? proposal.unresolved_items.filter(Boolean).join("；")
+        : "";
+      const policyVersions = Array.isArray(proposal.policy_versions)
+        ? proposal.policy_versions
+            .map((item) => `${item.file_name}@${item.version}`)
+            .join("；")
+        : "";
+      handoff.textContent = [
+        `接收角色：${proposal.receiver_role || "待分配"}`,
+        `处理截止：${proposal.deadline || "待设置"}`,
+        candidates ? `Top-2 候选：${candidates}` : "",
+        policyVersions ? `制度版本：${policyVersions}` : "",
+        unresolved ? `未结项：${unresolved}` : "",
+        proposal.decision_reason || ""
+      ].filter(Boolean).join(" · ");
 
       const actions = document.createElement("div");
       actions.className = "draft-actions";
@@ -685,7 +715,7 @@
       note.textContent = "确认前不会创建工单；预览 10 分钟内有效。";
       actions.append(button, note);
 
-      card.append(title, meta, description, actions);
+      card.append(title, meta, description, handoff, actions);
       messagesElement.appendChild(card);
       messagesElement.scrollTop = messagesElement.scrollHeight;
     }

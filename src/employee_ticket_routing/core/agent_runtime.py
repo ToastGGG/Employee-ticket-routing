@@ -281,12 +281,21 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    "unresolved_items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "deadline": {"type": "string"},
+                    "receiver_role": {"type": "string", "minLength": 1},
                 },
                 "required": [
                     "routing_token",
                     "title",
                     "description",
                     "attachment_ids",
+                    "unresolved_items",
+                    "deadline",
+                    "receiver_role",
                 ],
                 "additionalProperties": False,
             },
@@ -525,7 +534,11 @@ class AgentToolExecutor:
         if not query:
             raise AgentToolError("EMPTY_SEARCH_QUERY", "知识检索关键词不能为空。")
 
-        hits, citations = await self.runtime.retrieve(query, self.database)
+        hits, citations = await self.runtime.retrieve(
+            query,
+            self.database,
+            scope=self.state.profile,
+        )
         evidence = []
         for hit, citation in zip(hits, citations):
             self.state.evidence[citation.chunk_id] = citation
@@ -811,14 +824,62 @@ class AgentToolExecutor:
             consultation_risk = []
         all_risk = sorted(set(risk_flags + [str(item) for item in consultation_risk]))
         requires_human = bool(all_risk)
-        queue_map = {
-            "compensation": "compensation_benefits",
-            "benefits": "compensation_benefits",
-            "social_insurance": "social_insurance",
-            "employment_change": "employee_services",
-            "other": "employee_services",
+        candidate_map = {
+            "compensation": [
+                ("compensation_benefits", 0.92),
+                ("employee_services", 0.61),
+            ],
+            "benefits": [
+                ("compensation_benefits", 0.90),
+                ("employee_services", 0.64),
+            ],
+            "social_insurance": [
+                ("social_insurance", 0.94),
+                ("compensation_benefits", 0.58),
+            ],
+            "employment_change": [
+                ("employee_services", 0.88),
+                ("compensation_benefits", 0.56),
+            ],
+            "other": [
+                ("employee_services", 0.78),
+                ("compensation_benefits", 0.52),
+            ],
         }
-        queue = queue_map.get(case_type, "employee_services")
+        candidates = candidate_map.get(case_type, candidate_map["other"])
+        queue = candidates[0][0]
+        receiver_roles = {
+            "compensation_benefits": "薪酬福利服务专员",
+            "social_insurance": "社保公积金专员",
+            "employee_services": "员工服务专员",
+        }
+        queue_candidates = [
+            {
+                "queue": candidate_queue,
+                "confidence": round(
+                    max(0.35, confidence - (0.08 if requires_human else 0)),
+                    2,
+                ),
+            }
+            for candidate_queue, confidence in candidates
+        ]
+        confidence = queue_candidates[0]["confidence"]
+        policy_versions = [
+            {
+                "document_id": citation.document_id,
+                "file_name": citation.file_name,
+                "version": citation.document_version,
+                "effective_from": citation.effective_from,
+                "effective_to": citation.effective_to,
+                "source_owner": citation.source_owner,
+            }
+            for citation in self.state.evidence.values()
+        ]
+        decision_reason = (
+            f"主题 {consultation_payload.get('topic') or case_type}；"
+            f"已完成制度与咨询资料校验；引用有效制度 {len(policy_versions)} 条；"
+            f"风险标记 {', '.join(all_risk) if all_risk else '无'}。"
+        )
         priority = "high" if requires_human else "normal"
 
         # 校验 Token 在进入路由后立即消费，不能用于另一案件或第二次路由。
@@ -846,6 +907,11 @@ class AgentToolExecutor:
             "topic": consultation_payload.get("topic"),
             "details": consultation_payload.get("details"),
             "queue": queue,
+            "queue_candidates": queue_candidates,
+            "confidence": confidence,
+            "decision_reason": decision_reason,
+            "receiver_role": receiver_roles.get(queue, "员工服务专员"),
+            "policy_versions": policy_versions,
             "priority": priority,
             "requires_human": requires_human,
             "risk_flags": all_risk,
@@ -928,6 +994,34 @@ class AgentToolExecutor:
             for item in arguments.get("attachment_ids", [])
             if str(item).strip()
         ]
+        unresolved_items = [
+            str(item).strip()
+            for item in arguments.get("unresolved_items", [])
+            if str(item).strip()
+        ]
+        deadline = str(arguments.get("deadline") or "").strip()
+        try:
+            parsed_deadline = datetime.fromisoformat(deadline)
+        except ValueError as exc:
+            raise AgentToolError(
+                "HANDOFF_DEADLINE_REQUIRED",
+                "工单交接必须包含有效的截止日期。",
+            ) from exc
+        if parsed_deadline.date() < datetime.now(timezone.utc).date():
+            raise AgentToolError(
+                "HANDOFF_DEADLINE_INVALID",
+                "工单截止日期不能早于今天。",
+            )
+        receiver_role = str(
+            arguments.get("receiver_role")
+            or payload.get("receiver_role")
+            or ""
+        ).strip()
+        if not receiver_role:
+            raise AgentToolError(
+                "HANDOFF_RECEIVER_REQUIRED",
+                "工单交接必须明确接收角色。",
+            )
         return {
             "call_id": call_id,
             "title": title,
@@ -936,6 +1030,13 @@ class AgentToolExecutor:
             "topic": payload.get("topic"),
             "queue": payload.get("queue"),
             "priority": payload.get("priority"),
+            "queue_candidates": payload.get("queue_candidates", []),
+            "confidence": payload.get("confidence"),
+            "decision_reason": payload.get("decision_reason"),
+            "receiver_role": receiver_role,
+            "deadline": deadline,
+            "unresolved_items": unresolved_items,
+            "policy_versions": payload.get("policy_versions", []),
             "attachment_ids": attachment_ids,
         }
 
@@ -976,10 +1077,16 @@ class AgentToolExecutor:
                 "HUMAN_REVIEW_REQUIRED",
                 "当前工单存在高风险，必须转人工处理，不能自动创建草稿。",
             )
-        title = str(arguments.get("title") or "").strip()
-        description = str(arguments.get("description") or "").strip()
-        if not title or not description:
-            raise AgentToolError("DRAFT_CONTENT_REQUIRED", "工单标题和描述不能为空。")
+        prepared = self.prepare_ticket_draft(
+            call_id=call_id,
+            arguments=arguments,
+        )
+        title = str(prepared["title"])
+        description = str(prepared["description"])
+        attachment_ids = list(prepared["attachment_ids"])
+        unresolved_items = list(prepared["unresolved_items"])
+        deadline = str(prepared["deadline"])
+        receiver_role = str(prepared["receiver_role"])
         if not await self.database.consume_tool_token(
             jti=str(claims["jti"]),
             user_id=str(self.user["id"]),
@@ -988,16 +1095,18 @@ class AgentToolExecutor:
             purpose="create_ticket_draft",
         ):
             raise AgentToolError("TOKEN_REPLAYED", "路由凭证已被使用。")
-        attachment_ids = [
-            str(item)
-            for item in arguments.get("attachment_ids", [])
-            if str(item).strip()
-        ]
         validation_summary = {
             "policy_jti": payload.get("policy_jti"),
             "consultation_jti": payload.get("consultation_jti"),
             "routing_jti": str(claims["jti"]),
             "queue": payload.get("queue"),
+            "queue_candidates": payload.get("queue_candidates", []),
+            "confidence": payload.get("confidence"),
+            "decision_reason": payload.get("decision_reason"),
+            "receiver_role": receiver_role,
+            "deadline": deadline,
+            "unresolved_items": unresolved_items,
+            "policy_versions": payload.get("policy_versions", []),
             "priority": payload.get("priority"),
             "validation_digest": canonical_hash(payload),
         }
@@ -1011,6 +1120,13 @@ class AgentToolExecutor:
             priority=str(payload.get("priority") or "normal"),
             fields={
                 "queue": payload.get("queue"),
+                "queue_candidates": payload.get("queue_candidates", []),
+                "confidence": payload.get("confidence"),
+                "decision_reason": payload.get("decision_reason"),
+                "receiver_role": receiver_role,
+                "deadline": deadline,
+                "unresolved_items": unresolved_items,
+                "policy_versions": payload.get("policy_versions", []),
                 "attachment_ids": attachment_ids,
             },
             validation=validation_summary,
@@ -1039,6 +1155,13 @@ class AgentToolExecutor:
                 "topic": payload.get("topic"),
                 "priority": payload.get("priority"),
                 "queue": payload.get("queue"),
+                "queue_candidates": payload.get("queue_candidates", []),
+                "confidence": payload.get("confidence"),
+                "decision_reason": payload.get("decision_reason"),
+                "receiver_role": receiver_role,
+                "deadline": deadline,
+                "unresolved_items": unresolved_items,
+                "policy_versions": payload.get("policy_versions", []),
                 "expires_at": draft["expires_at"],
             },
         )
@@ -1546,6 +1669,16 @@ class MockToolCallingClient:
                         "系统已完成制度、咨询资料和分流规则校验。"
                     ),
                     "attachment_ids": [],
+                    "unresolved_items": [
+                        "员工确认咨询事实、适用人员和期望处理时间"
+                    ],
+                    "deadline": (
+                        datetime.now(timezone.utc).date()
+                        + timedelta(days=3)
+                    ).isoformat(),
+                    "receiver_role": str(
+                        data.get("receiver_role") or "员工服务专员"
+                    ),
                 },
             )
 
@@ -1931,8 +2064,12 @@ class AgentHarness:
                                 f"标题：{preview['title']}\n"
                                 f"业务方向：{preview.get('topic') or preview['category']}\n"
                                 f"处理队列：{preview.get('queue') or '员工服务'}\n"
+                                f"接收角色：{preview.get('receiver_role') or '员工服务专员'}\n"
                                 f"优先级：{preview.get('priority') or 'normal'}\n"
+                                f"处理截止：{preview.get('deadline') or '未设置'}\n"
                                 f"咨询说明：\n{preview['description']}\n"
+                                "未结项："
+                                f"{'；'.join(preview.get('unresolved_items') or []) or '无'}\n"
                                 "请核对以上内容。确认后系统才会真正执行建单并提交。"
                             )
                             for index in range(0, len(preview_text), 20):
@@ -1950,7 +2087,22 @@ class AgentHarness:
                                     "category": preview["category"],
                                     "topic": preview.get("topic"),
                                     "queue": preview.get("queue"),
+                                    "queue_candidates": preview.get(
+                                        "queue_candidates", []
+                                    ),
+                                    "confidence": preview.get("confidence"),
+                                    "decision_reason": preview.get(
+                                        "decision_reason"
+                                    ),
+                                    "receiver_role": preview.get("receiver_role"),
                                     "priority": preview.get("priority"),
+                                    "deadline": preview.get("deadline"),
+                                    "unresolved_items": preview.get(
+                                        "unresolved_items", []
+                                    ),
+                                    "policy_versions": preview.get(
+                                        "policy_versions", []
+                                    ),
                                     "expires_at": expires_at,
                                     "requires_user_confirmation": True,
                                 },

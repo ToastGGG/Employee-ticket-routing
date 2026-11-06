@@ -24,6 +24,38 @@
         版本
         <input name="version" maxlength="40" value="1.0">
       </label>
+      <label>
+        生效日期
+        <input name="effective_from" type="date">
+      </label>
+      <label>
+        失效日期
+        <input name="effective_to" type="date">
+      </label>
+      <label>
+        适用地区
+        <input name="region" maxlength="40" value="CN" placeholder="CN 或 *">
+      </label>
+      <label>
+        员工类型
+        <input name="employee_type" maxlength="60" value="employee" placeholder="employee 或 *">
+      </label>
+      <label>
+        政策组
+        <input name="policy_group" maxlength="60" value="default" placeholder="default 或 *">
+      </label>
+      <label>
+        确认状态
+        <select name="confirmation_status">
+          <option value="confirmed" selected>已确认生效</option>
+          <option value="draft">待确认</option>
+          <option value="superseded">已被替代</option>
+        </select>
+      </label>
+      <label>
+        制度责任人
+        <input name="source_owner" maxlength="120" placeholder="默认当前管理员">
+      </label>
       <button class="button primary" type="submit">上传并建立索引</button>
     </form>
     <p class="muted small">单文件最大 20 MB。扫描版 PDF 暂不支持 OCR。</p>
@@ -40,6 +72,9 @@
           <tr>
             <th>文件</th>
             <th>版本</th>
+            <th>适用范围</th>
+            <th>有效期</th>
+            <th>确认状态</th>
             <th>状态</th>
             <th>切片</th>
             <th>上传人</th>
@@ -55,6 +90,15 @@
                 <small class="block muted">{{ document.file_name }}</small>
               </td>
               <td>{{ document.version }}</td>
+              <td>
+                {{ document.region or '*' }} / {{ document.employee_type or '*' }}
+                <small class="block muted">{{ document.policy_group or '*' }}</small>
+              </td>
+              <td>
+                {{ document.effective_from or '未设置' }}
+                <small class="block muted">至 {{ document.effective_to or '长期' }}</small>
+              </td>
+              <td>{{ document.confirmation_status or 'confirmed' }}</td>
               <td>
                 <span class="badge {{ 'ok' if document.status == 'ready' else 'bad' if document.status == 'failed' else 'pending' }}">
                   {{ document.job_stage or document.status }}
@@ -82,7 +126,7 @@
               </td>
             </tr>
           {% else %}
-            <tr><td colspan="7" class="empty-cell">暂无制度文件。</td></tr>
+            <tr><td colspan="10" class="empty-cell">暂无制度文件。</td></tr>
           {% endfor %}
         </tbody>
       </table>
