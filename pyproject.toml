@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "employee-ticket-routing"
+version = "0.6.0"
+description = "面向企业员工的薪酬福利制度问答与咨询工单智能分流系统"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Employee Ticket Routing Team" }]
+keywords = [
+  "fastapi",
+  "agent",
+  "rag",
+  "employee-services",
+  "ticket-routing",
+  "human-in-the-loop",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Framework :: FastAPI",
+  "Operating System :: OS Independent",
+  "Topic :: Office/Business",
+]
+dependencies = [
+  "fastapi==0.162.0",
+  "uvicorn==0.54.0",
+  "aiosqlite==0.22.1",
+  "httpx==0.28.1",
+  "numpy==2.5.4",
+  "faiss-cpu==1.15.1",
+  "PyJWT==2.11.0",
+  "argon2-cffi==25.1.0",
+  "Jinja2==3.1.6",
+  "python-multipart==0.0.22",
+  "pypdf==6.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.9,<1.0",
+]
+
+[project.scripts]
+employee-ticket-routing = "employee_ticket_routing.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+employee_ticket_routing = [
+  "static/*",
+  "templates/*",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+exclude = [
+  ".git",
+  ".venv",
+  "data",
+  "docs",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+]
+ignore = [
+  "E501",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"

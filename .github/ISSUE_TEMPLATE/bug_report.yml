@@ -1,0 +1,56 @@
+name: 缺陷报告
+description: 报告可复现的功能、安全或界面异常
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿粘贴真实 API Key、员工薪酬数据、身份证号或完整 JWT。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响模块
+      options:
+        - 员工问答
+        - Agent 工具链
+        - 工单确认
+        - 知识库
+        - 提示词
+        - 对话审计
+        - 登录鉴权
+        - 运维工具
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 请按 1、2、3 描述
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: input
+    id: request_id
+    attributes:
+      label: Request ID
+      description: 页面或日志中的 request_id，便于定位。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我已移除密钥、个人信息和生产数据
+          required: true
