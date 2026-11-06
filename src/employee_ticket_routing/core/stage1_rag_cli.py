@@ -105,6 +105,8 @@ class Settings:
     embedding_model: str | None
     embedding_dimension: int
     llm_provider: str
+    llm_provider_requested: str
+    llm_fallback_reason: str | None
     llm_api_url: str | None
     llm_api_key: str | None
     llm_model: str | None
@@ -148,11 +150,37 @@ class Settings:
             "remote" if embedding_api_key else "hash",
         ).strip().lower()
 
-        llm_api_key = os.getenv("LLM_API_KEY") or None
-        llm_provider = os.getenv(
+        generic_llm_key = os.getenv("LLM_API_KEY") or None
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY") or None
+        llm_provider_requested = os.getenv(
             "LLM_PROVIDER",
-            "openai_compatible" if llm_api_key else "mock",
+            (
+                "deepseek"
+                if deepseek_key
+                else "openai_compatible"
+                if generic_llm_key
+                else "mock"
+            ),
         ).strip().lower()
+        llm_provider = llm_provider_requested
+        llm_fallback_reason: str | None = None
+
+        if llm_provider_requested == "deepseek":
+            llm_api_key = deepseek_key or generic_llm_key
+            llm_api_url = (
+                os.getenv("DEEPSEEK_API_URL")
+                or "https://api.deepseek.com/chat/completions"
+            )
+            llm_model = os.getenv("DEEPSEEK_MODEL") or "deepseek-chat"
+            if not llm_api_key:
+                llm_provider = "mock"
+                llm_fallback_reason = (
+                    "未配置 DEEPSEEK_API_KEY，已回退到现有 Mock 对话模式。"
+                )
+        else:
+            llm_api_key = generic_llm_key
+            llm_api_url = os.getenv("LLM_API_URL") or None
+            llm_model = os.getenv("LLM_MODEL") or None
 
         return cls(
             document_path=document_path or Path(
@@ -170,9 +198,11 @@ class Settings:
             embedding_model=os.getenv("EMBEDDING_MODEL") or None,
             embedding_dimension=_env_int("EMBEDDING_DIMENSION", 384),
             llm_provider=llm_provider,
-            llm_api_url=os.getenv("LLM_API_URL") or None,
+            llm_provider_requested=llm_provider_requested,
+            llm_fallback_reason=llm_fallback_reason,
+            llm_api_url=llm_api_url,
             llm_api_key=llm_api_key,
-            llm_model=os.getenv("LLM_MODEL") or None,
+            llm_model=llm_model,
             request_timeout=_env_float("REQUEST_TIMEOUT", 60.0),
         )
 
@@ -983,13 +1013,20 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
         print("[提示] 当前使用 Mock LLM。配置 LLM_PROVIDER=openai_compatible 可调用真实模型。")
         return MockLLMProvider()
 
-    if settings.llm_provider == "openai_compatible":
+    if settings.llm_provider in {"openai_compatible", "deepseek"}:
         if not settings.llm_api_url:
-            raise ValueError("LLM_PROVIDER=openai_compatible 时必须配置 LLM_API_URL")
+            raise ValueError(f"LLM_PROVIDER={settings.llm_provider} 时缺少 API URL")
         if not settings.llm_api_key:
-            raise ValueError("LLM_PROVIDER=openai_compatible 时必须配置 LLM_API_KEY")
+            provider_key = (
+                "DEEPSEEK_API_KEY"
+                if settings.llm_provider == "deepseek"
+                else "LLM_API_KEY"
+            )
+            raise ValueError(
+                f"LLM_PROVIDER={settings.llm_provider} 时必须配置 {provider_key}"
+            )
         if not settings.llm_model:
-            raise ValueError("LLM_PROVIDER=openai_compatible 时必须配置 LLM_MODEL")
+            raise ValueError(f"LLM_PROVIDER={settings.llm_provider} 时缺少模型名称")
         return OpenAICompatibleLLMProvider(
             api_url=settings.llm_api_url,
             api_key=settings.llm_api_key,

@@ -1272,11 +1272,13 @@ class OpenAICompatibleToolClient:
         api_key: str,
         model: str,
         timeout: float,
+        parallel_tool_calls: bool = True,
     ):
         self.api_url = api_url
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.parallel_tool_calls = parallel_tool_calls
 
     async def complete(
         self,
@@ -1288,10 +1290,11 @@ class OpenAICompatibleToolClient:
             "messages": list(messages),
             "tools": list(tools),
             "tool_choice": "auto",
-            # 允许多工具规划；Harness 仍按依赖顺序串行执行，不并发。
-            "parallel_tool_calls": True,
             "temperature": 0.1,
         }
+        if self.parallel_tool_calls:
+            # Harness 仍按依赖顺序串行执行，不把工具真正并发化。
+            payload["parallel_tool_calls"] = True
         timeout = httpx.Timeout(
             connect=min(10.0, self.timeout),
             read=self.timeout,
@@ -1868,18 +1871,23 @@ class AgentHarness:
         settings = self.runtime.settings
         if settings.llm_provider == "mock":
             return MockToolCallingClient()
-        if settings.llm_provider == "openai_compatible":
+        if settings.llm_provider in {"openai_compatible", "deepseek"}:
             if not settings.llm_api_url:
-                raise RuntimeError("缺少 LLM_API_URL。")
+                raise RuntimeError(f"{settings.llm_provider} 缺少 API URL。")
             if not settings.llm_api_key:
-                raise RuntimeError("缺少 LLM_API_KEY。")
+                raise RuntimeError(
+                    "缺少 DEEPSEEK_API_KEY。"
+                    if settings.llm_provider == "deepseek"
+                    else "缺少 LLM_API_KEY。"
+                )
             if not settings.llm_model:
-                raise RuntimeError("缺少 LLM_MODEL。")
+                raise RuntimeError("缺少模型名称。")
             return OpenAICompatibleToolClient(
                 api_url=settings.llm_api_url,
                 api_key=settings.llm_api_key,
                 model=settings.llm_model,
                 timeout=settings.request_timeout,
+                parallel_tool_calls=settings.llm_provider != "deepseek",
             )
         raise RuntimeError(f"不支持的 LLM_PROVIDER: {settings.llm_provider}")
 

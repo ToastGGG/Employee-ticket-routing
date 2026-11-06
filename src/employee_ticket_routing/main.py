@@ -767,6 +767,11 @@ async def health(request: Request):
             "documents": runtime.document_count,
             "chunks": runtime.chunk_count,
             "knowledge_error": runtime.error_message,
+            "llm_provider_requested": runtime.settings.llm_provider_requested,
+            "llm_provider": runtime.settings.llm_provider,
+            "llm_model": runtime.settings.llm_model,
+            "llm_configured": runtime.settings.llm_provider != "mock",
+            "llm_fallback_reason": runtime.settings.llm_fallback_reason,
         },
     }
 

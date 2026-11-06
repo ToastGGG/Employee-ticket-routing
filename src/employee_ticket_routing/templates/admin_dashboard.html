@@ -67,6 +67,13 @@
         <p><span class="status-dot bad"></span>检索服务未就绪</p>
         <p class="muted">{{ runtime.error_message or '请先上传制度文件。' }}</p>
       {% endif %}
+      <p class="muted">
+        AI 模式：{{ runtime.settings.llm_provider }}
+        {% if runtime.settings.llm_model %} · {{ runtime.settings.llm_model }}{% endif %}
+      </p>
+      {% if runtime.settings.llm_fallback_reason %}
+        <p class="warn small">{{ runtime.settings.llm_fallback_reason }}</p>
+      {% endif %}
     </article>
     <article>
       <span class="eyebrow">NEXT ACTION</span>

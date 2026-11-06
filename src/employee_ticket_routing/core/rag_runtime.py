@@ -443,13 +443,17 @@ class RagRuntime:
         provider = self.settings.llm_provider
         if provider == "mock":
             return MockStreamingLLMProvider()
-        if provider == "openai_compatible":
+        if provider in {"openai_compatible", "deepseek"}:
             if not self.settings.llm_api_url:
-                raise RuntimeError("缺少 LLM_API_URL")
+                raise RuntimeError(f"{provider} 缺少 API URL")
             if not self.settings.llm_api_key:
-                raise RuntimeError("缺少 LLM_API_KEY")
+                raise RuntimeError(
+                    "缺少 DEEPSEEK_API_KEY"
+                    if provider == "deepseek"
+                    else "缺少 LLM_API_KEY"
+                )
             if not self.settings.llm_model:
-                raise RuntimeError("缺少 LLM_MODEL")
+                raise RuntimeError("缺少模型名称")
             return OpenAICompatibleStreamingProvider(
                 api_url=self.settings.llm_api_url,
                 api_key=self.settings.llm_api_key,

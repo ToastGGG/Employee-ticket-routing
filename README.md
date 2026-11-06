@@ -74,6 +74,20 @@ JWT 默认写入 HttpOnly Cookie；JSON 登录接口也可返回 Bearer Token。
 
 ## 模型配置
 
+默认提供 DeepSeek 接入。复制 `.env.example` 为 `.env` 后填写密钥即可启用：
+
+```text
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=
+DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+`DEEPSEEK_API_KEY` 为空时不会发起外部模型请求，系统自动回退到现有
+Mock 对话模式，知识检索、Agent 工具链和确认流程仍可离线验证。
+
+通用 OpenAI-Compatible 供应商仍可使用：
+
 ```text
 LLM_PROVIDER=openai_compatible
 LLM_API_URL=https://供应商地址/v1/chat/completions
