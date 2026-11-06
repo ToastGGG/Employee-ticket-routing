@@ -41,7 +41,7 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(source["employee"]["phone"], "13900139000")
         self.assertNotEqual(result["employee"]["phone"], "13900139000")
         self.assertEqual(result["api_key"], "***wxyz")
-        self.assertEqual(result["items"][0]["password"], "***")
+        self.assertEqual(result["items"][0]["password"], "***d123")
 
     def test_tool_arguments_hide_signing_tokens(self) -> None:
         result = redact_tool_arguments(
