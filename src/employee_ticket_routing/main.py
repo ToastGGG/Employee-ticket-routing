@@ -40,14 +40,14 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 try:
-    from .agent_runtime import (
+    from .core.agent_runtime import (
         AgentHarness,
         AgentToolExecutor,
         PendingConfirmationStore,
         public_tool_payload,
     )
-    from .db import SQLiteDatabase
-    from .ingestion import (
+    from .core.db import SQLiteDatabase
+    from .core.ingestion import (
         MAX_FILE_SIZE,
         calculate_hash,
         create_document_job,
@@ -55,8 +55,8 @@ try:
         seed_default_document,
         validate_upload,
     )
-    from .rag_runtime import RagRuntime
-    from .security import (
+    from .core.rag_runtime import RagRuntime
+    from .core.security import (
         ACCESS_COOKIE_NAME,
         AgentTokenService,
         CSRF_COOKIE_NAME,
@@ -68,14 +68,14 @@ try:
         load_or_create_jwt_secret,
     )
 except ImportError:
-    from agent_runtime import (
+    from employee_ticket_routing.core.agent_runtime import (
         AgentHarness,
         AgentToolExecutor,
         PendingConfirmationStore,
         public_tool_payload,
     )
-    from db import SQLiteDatabase
-    from ingestion import (
+    from employee_ticket_routing.core.db import SQLiteDatabase
+    from employee_ticket_routing.core.ingestion import (
         MAX_FILE_SIZE,
         calculate_hash,
         create_document_job,
@@ -83,8 +83,8 @@ except ImportError:
         seed_default_document,
         validate_upload,
     )
-    from rag_runtime import RagRuntime
-    from security import (
+    from employee_ticket_routing.core.rag_runtime import RagRuntime
+    from employee_ticket_routing.core.security import (
         ACCESS_COOKIE_NAME,
         AgentTokenService,
         CSRF_COOKIE_NAME,
@@ -104,7 +104,7 @@ logging.basicConfig(
 logger = logging.getLogger("employee-service")
 
 BASE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = BASE_DIR.parent
+REPO_ROOT = BASE_DIR.parents[1]
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATE_DIR = BASE_DIR / "templates"
 DEFAULT_DATA_DIR = REPO_ROOT / "data"

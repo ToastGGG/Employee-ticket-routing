@@ -9,8 +9,8 @@
     pip install faiss-cpu numpy
 
 运行示例：
-    python stage1_rag_cli.py --document ./docs/薪酬福利制度.md
-    python stage1_rag_cli.py --document ./docs/薪酬福利制度示例.md --question "新人入职首月薪酬怎么计算？"
+    python -m src.employee_ticket_routing.core.stage1_rag_cli
+    python -m src.employee_ticket_routing.core.stage1_rag_cli --question "新人入职首月薪酬怎么计算？"
 
 可配置环境变量：
     LLM_PROVIDER:
@@ -78,8 +78,9 @@ else:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_DOCUMENT = BASE_DIR / "docs" / "薪酬福利制度.md"
-DEFAULT_CACHE_DIR = BASE_DIR / ".rag_cache"
+REPO_ROOT = BASE_DIR.parents[2]
+DEFAULT_DOCUMENT = REPO_ROOT / "docs" / "薪酬福利制度示例.md"
+DEFAULT_CACHE_DIR = REPO_ROOT / ".rag_cache"
 
 
 @dataclass(frozen=True)

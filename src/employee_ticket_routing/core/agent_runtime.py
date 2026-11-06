@@ -27,9 +27,9 @@ try:
     from .rag_runtime import Citation, RagRuntime
     from .security import AgentTokenService
 except ImportError:
-    from db import SQLiteDatabase
-    from rag_runtime import Citation, RagRuntime
-    from security import AgentTokenService
+    from employee_ticket_routing.core.db import SQLiteDatabase
+    from employee_ticket_routing.core.rag_runtime import Citation, RagRuntime
+    from employee_ticket_routing.core.security import AgentTokenService
 
 
 class AgentToolError(Exception):

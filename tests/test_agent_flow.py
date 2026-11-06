@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.agent_runtime import AgentToolExecutor  # noqa: E402
-from src.app import app  # noqa: E402
+from src.employee_ticket_routing.core.agent_runtime import AgentToolExecutor  # noqa: E402
+from src.employee_ticket_routing.main import app  # noqa: E402
 
 
 def parse_sse(raw: str) -> list[tuple[str, dict]]:

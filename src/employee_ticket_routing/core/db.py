@@ -1,5 +1,5 @@
 """
-SQLite 数据访问层。
+SQLite 数据访问层，集中管理业务表、审计表和 Agent 决策轨迹。
 
 本阶段使用 aiosqlite 提供异步数据库访问。表结构沿用此前确定的最小模型：
 users、conversations、messages、knowledge_documents、document_chunks、

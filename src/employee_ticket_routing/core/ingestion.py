@@ -22,9 +22,9 @@ try:
     from .db import SQLiteDatabase
     from .rag_runtime import RagRuntime
 except ImportError:
-    import stage1_rag_cli as rag
-    from db import SQLiteDatabase
-    from rag_runtime import RagRuntime
+    from employee_ticket_routing.core import stage1_rag_cli as rag
+    from employee_ticket_routing.core.db import SQLiteDatabase
+    from employee_ticket_routing.core.rag_runtime import RagRuntime
 
 
 SUPPORTED_SUFFIXES = {".md", ".pdf"}

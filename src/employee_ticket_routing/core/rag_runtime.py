@@ -21,8 +21,8 @@ try:
     from . import stage1_rag_cli as rag
     from .db import SQLiteDatabase
 except ImportError:
-    import stage1_rag_cli as rag
-    from db import SQLiteDatabase
+    from employee_ticket_routing.core import stage1_rag_cli as rag
+    from employee_ticket_routing.core.db import SQLiteDatabase
 
 
 @dataclass(frozen=True)

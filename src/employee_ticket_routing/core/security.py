@@ -5,7 +5,8 @@
 1. Argon2id 密码哈希；
 2. JWT 签发和验证；
 3. 从 HttpOnly Cookie 或 Authorization Header 读取 Token；
-4. CSRF Token 生成与校验。
+4. CSRF Token 生成与校验；
+5. Agent 工具使用的一次性短期凭证。
 """
 
 from __future__ import annotations

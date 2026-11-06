@@ -24,11 +24,22 @@
 
 建议使用 Python 3.11 或 3.12。
 
+Windows 下可直接双击项目根目录的 `start.bat`。脚本会自动创建或修复
+`.venv`、检查并安装依赖、加载 `.env`，然后启动服务。
+
+也可以手动启动：
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn src.app:app --reload
+uvicorn src.employee_ticket_routing.main:app --reload
+```
+
+只检查启动环境而不启动服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1 -CheckOnly
 ```
 
 打开：
@@ -176,3 +187,14 @@ python -m unittest -v tests.test_agent_flow
 PDF 首期只支持文本型 PDF，不支持扫描件 OCR。知识文件最大 20 MB。
 
 知识文件“删除”采用软删除，历史对话中的引用快照仍然保留，便于审计。
+
+## 目录结构
+
+```text
+src/employee_ticket_routing/
+├── __init__.py
+├── main.py                 # FastAPI 程序入口
+├── core/                   # Agent、RAG、数据库、安全和入库逻辑
+├── static/                 # 员工端页面资源
+└── templates/              # 服务端渲染管理页面
+```
